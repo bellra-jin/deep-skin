@@ -16,22 +16,29 @@ FACEPART_SIDE = {5: "left", 6: "right"}
 FACEPART_DIR = {5: "l_cheek", 6: "r_cheek"}
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff"}
 
-# A-baseline
+# 각도 코드는 "얼굴이 도는 방향" 기준이다.
+#   R15/R30 (5,6) -> 얼굴이 오른쪽으로 회전 -> 왼볼이 카메라 정면으로 온다
+#   L15/L30 (3,4) -> 얼굴이 왼쪽으로 회전   -> 오른볼이 카메라 정면으로 온다
+#   7/8 은 스마트패드·스마트폰 전용 측면. 7=오른볼용, 8=왼볼용.
+#
+# 초기 구현은 이를 반대로 해석해 각 부위에서 가장 선명한 각도를 버리고
+# 가장 눌린 각도를 학습에 넣고 있었다. bbox 통계와 crop 육안 검증으로 확인 후 수정.
+# (검증 스크립트: notebooks/jh/angle_check.py)
 ALLOWED_ANGLES = {
-    5: {0, 1, 2, 3},  # left cheek: F, Ft, Fb, L15
-    6: {0, 1, 2, 5},  # right cheek: F, Ft, Fb, R15
+    5: {0, 1, 2, 5, 6, 8},  # 왼볼:   정면·위·아래 + R15·R30 + 패드/폰 측면(8)
+    6: {0, 1, 2, 3, 4, 7},  # 오른볼: 정면·위·아래 + L15·L30 + 패드/폰 측면(7)
 }
 
 DEFAULT_MARGIN = (0.06, 0.08)
-ANGLE_MARGIN = {
-    3: (0.10, 0.08),
-    5: (0.10, 0.08),
-}
+# 남긴 각도는 모두 가로 폭이 충분하다(비율 1퍼센타일 0.49 이상).
+# 각도별 여백 보정이 필요 없어 비워 둔다.
+ANGLE_MARGIN: dict[int, tuple[float, float]] = {}
 
-ANGLE_QUALITY_RULES = {
-    3: {"min_width": 120, "min_ratio": 0.18, "min_area": 60000},
-    5: {"min_width": 120, "min_ratio": 0.18, "min_area": 60000},
-}
+# 각도별 규칙 대신 전 각도 공통 가드.
+# Training 15,444건 실측: min_width=150 -> 0.48% 제거, min_ratio=0.45 -> 0.06% 제거.
+# 주로 스마트폰 저해상도 촬영분의 꼬리를 잘라낸다.
+DEFAULT_QUALITY_RULE = {"min_width": 150, "min_ratio": 0.45, "min_area": 60000}
+ANGLE_QUALITY_RULES: dict[int, dict] = {}
 
 CSV_COLUMNS = [
     "image_path",
@@ -188,7 +195,7 @@ def _expand_bbox(
 
 
 def _passes_quality_filter(angle: Optional[int], width: int, height: int) -> bool:
-    rules = ANGLE_QUALITY_RULES.get(angle)
+    rules = ANGLE_QUALITY_RULES.get(angle, DEFAULT_QUALITY_RULE)
     if rules is None:
         return True
 

@@ -8,4 +8,20 @@ dependencies = [
     "jupyter>=1.1.1",
     "matplotlib>=3.10.9",
     "numpy>=2.4.4",
+    "torch>=2.5",
+    "torchvision>=0.20",
+    "scikit-learn>=1.5",
+    "pandas>=2.2",
+    "timm>=1.0",
 ]
+
+# CUDA 미지원 환경(내장 GPU)이므로 CPU 전용 휠을 사용한다.
+# 기본 PyPI 휠은 CUDA 런타임이 포함돼 2GB 이상이지만 CPU 휠은 약 200MB다.
+[tool.uv.sources]
+torch = { index = "pytorch-cpu" }
+torchvision = { index = "pytorch-cpu" }
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true

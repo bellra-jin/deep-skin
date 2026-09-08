@@ -213,3 +213,24 @@ backend/scripts/facepart_03_test/0001_01_F.jpg
 
 # SQLite fallback (should not exist — project uses MySQL)
 backend/*.db
+
+# --- 볼 부위 고도화 실험 (포크 이후) ---
+
+# 특징 캐시: 재생성 가능하고 100MB 단위라 올리지 않는다
+data/features/
+*.npz
+
+# 실행 로그
+*_log.txt
+
+# Windows 실행 런처 — 실제 명령은 README 11장에 정리돼 있다
+RUN_*.cmd
+PROBE_*.cmd
+extract_aihub.ps1
+
+# 단, 실험 결과 기록은 저장소에 남긴다 (results/* 예외)
+!results/head_experiments.csv
+
+# 작업 인계서 (개인 메모)
+HANDOFF.md
+COMMIT_MSG.txt
