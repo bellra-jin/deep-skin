@@ -40,6 +40,12 @@ class PartReport(BaseModel):
     summary: str
     issues: list[IssueItem]
     recommendation: Optional[RecommendationSummary]
+    # 이 부위의 bbox 출처. skin_part_detections.bbox_source 를 부위 단위로 집계한 값.
+    #   "yolo"                 검출된 bbox 로 추론 - 신뢰 가능
+    #   "full_image_fallback"  미검출이라 얼굴 전체 이미지로 추론 - 추정값
+    #   "mixed"                좌우 중 한쪽만 검출됨 (눈가/볼은 좌우 두 부위를 묶는다)
+    #   None                   검출 기록이 없음 (dev JSON 경로 등)
+    bbox_source: Optional[str] = None
 
 
 class ReportResponse(BaseModel):

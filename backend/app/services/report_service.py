@@ -11,6 +11,7 @@ from app.core.exceptions import (
 )
 from app.models.analysis_session import AnalysisSession
 from app.models.part_recommendation import PartRecommendation
+from app.models.skin_part_detection import SkinPartDetection
 from app.models.skin_part_result import SkinPartResult
 from app.schemas.recommendation import ExcludedIngredientItem, IngredientItem
 from app.schemas.report import (
@@ -80,6 +81,14 @@ def get_report(db: Session, session_id: int, user_id: int) -> ReportResponse:
         (r.display_part_name, r.issue_type): r for r in recommendations
     }
 
+    # bbox 출처. 미검출 부위는 얼굴 전체 이미지로 추론되므로 추정값임을 알려야 한다.
+    detections: list[SkinPartDetection] = (
+        db.query(SkinPartDetection)
+        .filter(SkinPartDetection.session_id == session_id)
+        .all()
+    )
+    source_by_raw_part: dict[str, str] = {d.raw_part_name: d.bbox_source for d in detections}
+
     part_map: dict[str, list[SkinPartResult]] = defaultdict(list)
     for r in results:
         part_map[r.display_part_name].append(r)
@@ -115,6 +124,7 @@ def get_report(db: Session, session_id: int, user_id: int) -> ReportResponse:
             summary=summary,
             issues=issues,
             recommendation=rec_summary,
+            bbox_source=_aggregate_bbox_source(part_results, source_by_raw_part),
         ))
 
     part_reports.sort(
@@ -130,6 +140,29 @@ def get_report(db: Session, session_id: int, user_id: int) -> ReportResponse:
         overall_summary=overall,
         part_reports=part_reports,
     )
+
+
+def _aggregate_bbox_source(
+    part_results: list[SkinPartResult],
+    source_by_raw_part: dict[str, str],
+) -> str | None:
+    """부위 단위 bbox 출처를 집계한다.
+
+    display_part_name 하나가 raw_part_name 여럿을 묶는다
+    ("눈가" = left_eye + right_eye, "볼" = left_cheek + right_cheek).
+    고개를 돌린 사진에서는 한쪽만 미검출될 수 있으므로 이진값으로 뭉개지 않고
+    "mixed" 를 따로 둔다.
+    """
+    sources = {
+        source_by_raw_part[r.raw_part_name]
+        for r in part_results
+        if r.raw_part_name in source_by_raw_part
+    }
+    if not sources:
+        return None
+    if len(sources) == 1:
+        return next(iter(sources))
+    return "mixed"
 
 
 def _build_recommendation(

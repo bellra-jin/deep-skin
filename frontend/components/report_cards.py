@@ -210,6 +210,31 @@ def _overall_severity(status: str) -> str:
 
 # ── 부위별 카드 헤더 (컴팩트 그리드용) ───────────────────────────────────────
 
+# ── 추정값 표시 ──────────────────────────────────────────────────────────────
+
+_ESTIMATION_LABEL = {
+    "full_image_fallback": ("추정값", "이 부위가 사진에서 검출되지 않아 얼굴 전체 이미지로 추정한 값입니다."),
+    "mixed": ("일부 추정", "좌우 중 한쪽이 검출되지 않아 해당 쪽은 얼굴 전체 이미지로 추정했습니다."),
+}
+
+
+def estimation_badge_html(bbox_source: str = None) -> str:
+    """bbox 출처가 검출(yolo)이 아니면 추정값 배지를 만든다.
+
+    값을 숨기지 않고 추정임을 밝히는 쪽이 맞다. 숨기면 사용자는
+    "왜 항목이 없지?" 가 되고, 그냥 두면 추정값을 측정값으로 오해한다.
+    """
+    label = _ESTIMATION_LABEL.get(bbox_source or "")
+    if not label:
+        return ""
+    text, tip = label
+    return (
+        f'<span title="{tip}" style="display:inline-block;padding:1px 7px;'
+        f'border:1px solid #C9A227;border-radius:9px;background:#FFF8E1;'
+        f'color:#8A6D0B;font-size:10px;font-weight:600;">{text}</span>'
+    )
+
+
 def render_part_card_header(part: dict):
     part_name = part.get("display_part_name", "")
     issues    = part.get("issues") or []
@@ -231,6 +256,7 @@ def render_part_card_header(part: dict):
     icon_html = _part_icon(part_name, 60)
     stars     = stars_html(worst)
     badge     = severity_badge_html(worst)
+    est_badge = estimation_badge_html(part.get("bbox_source"))
 
     st.markdown(f"""
     <div class="ds-part-card">
@@ -238,6 +264,7 @@ def render_part_card_header(part: dict):
         <div style="font-size:14px;font-weight:700;color:#0F2447;margin-bottom:6px;">{part_name}</div>
         <div style="margin:4px 0;">{stars}</div>
         <div style="margin-top:6px;">{badge}</div>
+        <div style="margin-top:4px;">{est_badge}</div>
         <div style="margin-top:8px;line-height:1.8;">{concern_chips}</div>
     </div>
     """, unsafe_allow_html=True)
@@ -257,6 +284,16 @@ def render_part_detail(part: dict):
     care_tips   = rec.get("care_tips")    or []
 
     with st.expander(f"**{part_name}** 상세 분석", expanded=False):
+        est = _ESTIMATION_LABEL.get(part.get("bbox_source") or "")
+        if est:
+            st.markdown(
+                f'<div style="padding:8px 12px;margin:0 0 12px;border-radius:8px;'
+                f'background:#FFF8E1;border:1px solid #F0DFA0;color:#8A6D0B;'
+                f'font-size:12px;line-height:1.6;">'
+                f'<b>{est[0]}</b> - {est[1]}<br>'
+                f'정면을 바라보고 다시 촬영하면 더 정확한 결과를 받을 수 있습니다.</div>',
+                unsafe_allow_html=True,
+            )
         if summary:
             st.markdown(
                 f'<p style="color:#6B7894;font-size:14px;margin:0 0 14px;">{summary}</p>',
