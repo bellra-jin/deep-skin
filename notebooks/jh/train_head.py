@@ -94,7 +94,8 @@ def load_npz(path: Path) -> dict:
 
 
 def prepare(pack: dict, target: str, grades: int, device_filter: int | None,
-            min_width: int = 0, lut: np.ndarray | None = None):
+            min_width: int = 0, lut: np.ndarray | None = None,
+            angles: list[int] | None = None):
     y = pack[f"labels_{target}"].astype(np.int64)
     keep = y >= 0
     if device_filter is not None:
@@ -103,6 +104,10 @@ def prepare(pack: dict, target: str, grades: int, device_filter: int | None,
     # 실제 서비스보다 낙관적인 수치가 나온다.
     if min_width and "crop_width" in pack:
         keep &= pack["crop_width"] >= min_width
+    # 각도 필터. 기기 도메인 갭이 "기기 차이"인지 "각도 구성 차이"인지 분해할 때 쓴다.
+    # AI-Hub 는 각도와 기기가 독립이 아니다 - 디카는 0~6, 패드/폰은 0·7·8 뿐이다.
+    if angles:
+        keep &= np.isin(pack["angle"], list(angles))
     idx = np.nonzero(keep)[0]
 
     y = y[idx]
@@ -266,6 +271,9 @@ def main() -> None:
     ap.add_argument("--min-width", type=int, default=0,
                     help="크롭 폭 하한. 0이면 필터 없음. "
                          "npz 에 crop_width 가 없으면 무시하고 경고한다.")
+    ap.add_argument("--eval-angles", type=int, nargs="+", default=None,
+                    help="검증 세트를 각도로 한 번 더 거른다 (도메인 갭 분해용). "
+                         "학습 세트에는 적용하지 않는다.")
     ap.add_argument("--min-width-split", choices=["both", "train"], default="both",
                     help="both: train/val 모두 거른다 (서비스 조건에 맞는 수치). "
                          "train: train 만 거른다 (검증셋을 고정해 임계값끼리 비교할 때).")
@@ -351,7 +359,8 @@ def main() -> None:
     lut = merge3_lut(full_grades, args.merge3) if args.grades == 3 else None
     va_min_width = args.min_width if args.min_width_split == "both" else 0
     tr = prepare(tr_pack, args.target, args.grades, train_dev, args.min_width, lut)
-    va = prepare(va_pack, args.target, args.grades, val_dev, va_min_width, lut)
+    va = prepare(va_pack, args.target, args.grades, val_dev, va_min_width, lut,
+                 angles=args.eval_angles)
 
     if args.tta_flip and va["feat_flip"] is None:
         raise SystemExit(
@@ -364,7 +373,8 @@ def main() -> None:
     print(f"target={args.target}  grades={args.grades}  loss={args.loss}  "
           f"sampler={args.sampler}  eval={args.eval}")
     print(f"  train {len(tr['y']):,}건" + (f" (디카만)" if train_dev is not None else ""))
-    print(f"  val   {len(va['y']):,}건" + (f" (폰만)" if val_dev is not None else ""))
+    print(f"  val   {len(va['y']):,}건" + (f" (폰만)" if val_dev is not None else "")
+          + (f" 각도 {args.eval_angles}" if args.eval_angles else ""))
     print(f"  train 클래스 분포: " +
           " ".join(f"{c}:{n}({n/len(tr['y'])*100:.1f}%)" for c, n in enumerate(counts)))
     va_counts = np.bincount(va["y"], minlength=num_classes)
@@ -471,7 +481,7 @@ def main() -> None:
         "target": args.target, "grades": args.grades, "loss": args.loss,
         "sampler": args.sampler, "class_weight": args.class_weight,
         "eval": args.eval, "arch": args.arch, "hidden": args.hidden,
-        "lr": args.lr, "epochs_run": ep, "best_epoch": best_epoch,
+        "lr": args.lr, "seed": args.seed, "epochs_run": ep, "best_epoch": best_epoch,
         "n_train": len(tr["y"]), "n_val": len(va["y"]),
         "macro_f1": round(best["macro_f1"], 4),
         "accuracy": round(best["accuracy"], 4),
