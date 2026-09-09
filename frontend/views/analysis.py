@@ -36,6 +36,12 @@ def show():
             _analyzing_fragment()
             return
 
+        if state == "pose_warning":
+            _hide_idle_analysis_ui()
+            _render_steps("complete")
+            _render_pose_warning()
+            return
+
         if state == "complete":
             _hide_idle_analysis_ui()
             _render_steps("complete")
@@ -59,6 +65,7 @@ def _ensure_state():
     st.session_state.setdefault("analysis_flow_state", "idle")
     st.session_state.setdefault("analysis_image_data", None)
     st.session_state.setdefault("analysis_error_message", "")
+    st.session_state.setdefault("analysis_pose_check", None)
 
 
 def _start_api_if_needed():
@@ -69,7 +76,8 @@ def _start_api_if_needed():
     st.session_state["_analysis_step"] = 0
     token = st.session_state.get("access_token")
     image_data = st.session_state.get("analysis_image_data")
-    api_result: dict = {"ok": None, "error": None, "status_code": None, "session_id": None}
+    api_result: dict = {"ok": None, "error": None, "status_code": None,
+                        "session_id": None, "pose_check": None}
 
     def _run():
         s = analysis_api.create_session(token, "피부 분석")
@@ -86,6 +94,7 @@ def _start_api_if_needed():
             api_result["error"] = api_client.get_error_message(u)
             api_result["status_code"] = u.get("_status")
             return
+        api_result["pose_check"] = u.get("pose_check")
         api_result["ok"] = True
 
     threading.Thread(target=_run, daemon=True).start()
@@ -107,7 +116,14 @@ def _analyzing_fragment():
         st.session_state.pop("_analysis_step", None)
         if ok:
             st.session_state["analysis_image_data"] = None
-            st.session_state["analysis_flow_state"] = "complete"
+            # 정면이 아니면 리포트로 바로 넘기지 않고 한 번 알린다.
+            # 차단이 아니라 경고다 - 사용자가 "이대로 진행"을 고를 수 있다.
+            pose = api_result.get("pose_check") or {}
+            st.session_state["analysis_pose_check"] = pose
+            if pose.get("status") in ("turned", "face_not_detected"):
+                st.session_state["analysis_flow_state"] = "pose_warning"
+            else:
+                st.session_state["analysis_flow_state"] = "complete"
         else:
             if api_result.get("status_code") == 401:
                 handle_401()
@@ -260,6 +276,46 @@ def _render_start_button(image_data: dict | None):
         """,
         unsafe_allow_html=True,
     )
+
+
+def _render_pose_warning():
+    """정면이 아닌 사진에 경고를 띄운다. 업로드를 막지는 않는다.
+
+    판정이 틀렸을 때 사용자가 아무것도 못 하게 되면 안 되므로
+    "이대로 진행"을 항상 남겨 둔다. 그대로 진행하면 리포트의
+    "추정값" 배지가 두 번째 방어선이 된다.
+    """
+    pose = st.session_state.get("analysis_pose_check") or {}
+    message = pose.get("message") or "사진을 다시 확인해주세요."
+    score = pose.get("score")
+    detail = "" if score is None else f"좌우 대칭 편차 {abs(score):.3f} (기준 {pose.get('threshold', 0.05)})"
+
+    st.markdown(
+        f"""
+        <div style="padding:16px 18px;margin:8px 0 18px;border-radius:12px;
+                    background:#FFF8E1;border:1px solid #F0DFA0;color:#8A6D0B;">
+            <div style="font-size:15px;font-weight:700;margin-bottom:6px;">
+                분석은 끝났지만, 사진을 한 번 더 확인해주세요
+            </div>
+            <div style="font-size:13px;line-height:1.7;">{message}</div>
+            <div style="font-size:11px;color:#A08A3C;margin-top:8px;">{detail}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    col_retake, col_proceed = st.columns([1, 1], gap="medium")
+    with col_retake:
+        if st.button("다시 찍기", use_container_width=True, key="ds_pose_retake"):
+            st.session_state["analysis_pose_check"] = None
+            st.session_state["analysis_image_data"] = None
+            st.session_state["analysis_flow_state"] = "idle"
+            st.rerun()
+    with col_proceed:
+        if st.button("이대로 진행", type="primary", use_container_width=True,
+                     key="ds_pose_proceed"):
+            st.session_state["analysis_flow_state"] = "complete"
+            st.rerun()
 
 
 def _render_complete():

@@ -31,6 +31,20 @@ class PartResult(BaseModel):
     confidence_score: Optional[float] = None
 
 
+class PoseCheck(BaseModel):
+    """업로드 사진의 정면 여부. 차단이 아니라 경고용이다.
+
+    status  frontal | turned | face_not_detected
+    score   미간이 두 볼 중점에서 좌우로 벗어난 정도(볼 간격으로 정규화).
+            판정 불가 시 None - 이 경우를 정면으로 취급하지 않는다.
+    """
+
+    status: str
+    score: Optional[float] = None
+    threshold: Optional[float] = None
+    message: Optional[str] = None
+
+
 class InferenceResult(BaseModel):
     model_name: str
     model_version: str
@@ -90,3 +104,5 @@ class ImageUploadResponse(BaseModel):
     upload_status: str
     session_status: str
     inference_result: InferenceResult
+    # 정면 여부 경고. flat 모드처럼 검출 결과가 없으면 None 이다.
+    pose_check: Optional[PoseCheck] = None

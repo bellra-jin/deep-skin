@@ -25,8 +25,18 @@ from app.models.skin_metric_value import SkinMetricValue
 from app.models.skin_part_detection import SkinPartDetection
 from app.models.skin_part_result import SkinPartResult
 from app.models.uploaded_image import UploadedImage
-from app.schemas.image_upload import ImageUploadResponse, InferenceResult, PartResult
-from app.services import inference_service, multivalue_parser, recommendation_service
+from app.schemas.image_upload import (
+    ImageUploadResponse,
+    InferenceResult,
+    PartResult,
+    PoseCheck,
+)
+from app.services import (
+    inference_service,
+    multivalue_parser,
+    pose_check,
+    recommendation_service,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -117,13 +127,15 @@ async def upload_image(
         db.commit()
 
         if settings.AI_INFERENCE_MODE == "multivalue":
-            result = _run_multivalue_mode(
+            result, pose = _run_multivalue_mode(
                 db, session, image_record, session_id, user_id, str(file_path)
             )
         else:
             result = _run_flat_mode(
                 db, session, image_record, session_id, user_id, str(file_path)
             )
+            # flat 모드는 부위 검출 결과가 없어 정면 여부를 판정할 수 없다.
+            pose = None
 
     except Exception as exc:
         image_record.upload_status = "failed"
@@ -144,6 +156,7 @@ async def upload_image(
         upload_status=image_record.upload_status,
         session_status=session.status,
         inference_result=result,
+        pose_check=pose,
     )
 
 
@@ -207,7 +220,7 @@ def _run_multivalue_mode(
     session_id: int,
     user_id: int,
     file_path: str,
-) -> InferenceResult:
+) -> tuple[InferenceResult, PoseCheck | None]:
     payload = inference_service.run_multivalue_inference(
         file_path,
         session_id=session_id,
@@ -252,9 +265,14 @@ def _run_multivalue_mode(
 
     recommendation_service.generate_and_save(db, session_id, user_id)
 
+    # 정면 여부 판정. AI 서버가 이미 돌린 검출 결과만 쓰므로 추가 비용이 없다.
+    # 차단이 아니라 경고이며, 그대로 진행하면 리포트의 "추정값" 배지가
+    # 두 번째 방어선이 된다.
+    pose = PoseCheck(**pose_check.judge_pose(payload.get("detected_parts")))
+
     # API 응답용 InferenceResult 합성 (annotations 기반 part_results 사용)
     raw_resp = parsed["raw_response"]
-    return InferenceResult(
+    result = InferenceResult(
         model_name=raw_resp.model_name,
         model_version=raw_resp.model_version,
         parts=[
@@ -273,6 +291,7 @@ def _run_multivalue_mode(
             for pr in parsed["part_results"]
         ],
     )
+    return result, pose
 
 
 def _delete_file(path: Path) -> None:
