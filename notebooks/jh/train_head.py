@@ -23,6 +23,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import math
 import sys
 import time
 from datetime import datetime
@@ -156,19 +157,29 @@ class FeatDataset(Dataset):
 # 헤드 · 손실
 # --------------------------------------------------------------------------- #
 class MLPHead(nn.Module):
+    """trunk 와 출력층을 분리해 둔다.
+
+    DANN 의 도메인 분류기가 원본 특징이 아니라 trunk 출력을 받아야 하기 때문이다.
+    백본이 동결돼 있으므로 이 trunk 가 유일하게 학습되는 표현이다.
+    레이어 구성과 초기화 순서는 분리 전과 같아 결과는 바뀌지 않는다.
+    """
+
     def __init__(self, in_dim, out_dim, hidden=0, dropout=0.3):
         super().__init__()
         if hidden:
-            self.net = nn.Sequential(
+            self.trunk = nn.Sequential(
                 nn.Linear(in_dim, hidden), nn.BatchNorm1d(hidden),
                 nn.ReLU(inplace=True), nn.Dropout(dropout),
-                nn.Linear(hidden, out_dim),
             )
+            self.fc = nn.Linear(hidden, out_dim)
+            self.feat_dim = hidden
         else:
-            self.net = nn.Sequential(nn.Dropout(dropout), nn.Linear(in_dim, out_dim))
+            self.trunk = nn.Dropout(dropout)
+            self.fc = nn.Linear(in_dim, out_dim)
+            self.feat_dim = in_dim
 
     def forward(self, x):
-        return self.net(x)
+        return self.fc(self.trunk(x))
 
 
 class CoralHead(nn.Module):
@@ -186,6 +197,7 @@ class CoralHead(nn.Module):
         else:
             self.trunk = nn.Dropout(dropout)
             feat_dim = in_dim
+        self.feat_dim = feat_dim
         self.fc = nn.Linear(feat_dim, 1, bias=False)
         self.bias = nn.Parameter(torch.zeros(num_classes - 1))
 
@@ -210,6 +222,43 @@ def focal_loss(logits, y, gamma=2.0, weight=None):
     if weight is not None:
         loss = loss * weight[y]
     return loss.mean()
+
+
+class GradientReversal(torch.autograd.Function):
+    """순전파는 항등, 역전파에서 부호를 뒤집는다.
+
+    도메인 분류기는 기기를 잘 맞히도록 학습되지만, 그 기울기가 뒤집혀
+    특징 쪽으로 흐르므로 특징은 기기를 구분할 수 없는 방향으로 밀린다.
+    """
+
+    @staticmethod
+    def forward(ctx, x, lambd):
+        ctx.lambd = lambd
+        return x.view_as(x)
+
+    @staticmethod
+    def backward(ctx, grad):
+        return -ctx.lambd * grad, None
+
+
+class DomainHead(nn.Module):
+    """디카(0) vs 폰(2) 이진 분류기. 패드(1)는 이번 실험에서 제외한다."""
+
+    def __init__(self, in_dim, hidden=128, dropout=0.3):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(in_dim, hidden), nn.ReLU(inplace=True),
+            nn.Dropout(dropout), nn.Linear(hidden, 2),
+        )
+
+    def forward(self, x):
+        return self.net(x)
+
+
+def dann_lambda_at(epoch: int, epochs: int, scale: float) -> float:
+    """DANN 논문의 램프. 처음부터 세게 걸면 등급 학습이 무너진다."""
+    p = (epoch - 1) / max(epochs, 1)
+    return scale * (2.0 / (1.0 + math.exp(-10.0 * p)) - 1.0)
 
 
 def coral_predict(logits):
@@ -271,6 +320,12 @@ def main() -> None:
     ap.add_argument("--min-width", type=int, default=0,
                     help="크롭 폭 하한. 0이면 필터 없음. "
                          "npz 에 crop_width 가 없으면 무시하고 경고한다.")
+    ap.add_argument("--dann", action="store_true",
+                    help="적대적 도메인 적응. 디카(소스)와 폰(타깃)의 특징 분포를 "
+                         "gradient reversal 로 맞춘다. 타깃 라벨은 쓰지 않는다.")
+    ap.add_argument("--dann-lambda", type=float, default=1.0,
+                    help="도메인 손실 가중치의 상한. 램프로 0 에서 이 값까지 올린다.")
+    ap.add_argument("--dann-hidden", type=int, default=128)
     ap.add_argument("--eval-angles", type=int, nargs="+", default=None,
                     help="검증 세트를 각도로 한 번 더 거른다 (도메인 갭 분해용). "
                          "학습 세트에는 적용하지 않는다.")
@@ -393,6 +448,23 @@ def main() -> None:
         if pack.get("feat_devaug") is not None:
             pack["feat_devaug"] = ((pack["feat_devaug"] - mu) / sd).astype(np.float32)
 
+    # 적대적 도메인 적응용 소스/타깃 특징.
+    # 둘 다 train split 에서만 뽑는다 - val split 은 학습에 일절 쓰지 않는다.
+    # 타깃(폰)은 라벨을 쓰지 않고 도메인 손실에만 들어간다.
+    src_t = tgt_t = None
+    if args.dann:
+        dev = tr_pack["device"]
+        src_raw = tr_pack["feat"][dev == 0]
+        tgt_raw = tr_pack["feat"][dev == 2]
+        if len(src_raw) == 0 or len(tgt_raw) == 0:
+            raise SystemExit("DANN: 학습 split 에 디카(0) 또는 폰(2) 표본이 없습니다.")
+        # 표준화는 소스 통계(mu, sd)를 그대로 쓴다. 타깃 통계로 다시 내면
+        # 타깃 분포 정보가 새어 들어간다.
+        src_t = torch.from_numpy(((src_raw - mu) / sd).astype(np.float32))
+        tgt_t = torch.from_numpy(((tgt_raw - mu) / sd).astype(np.float32))
+        print(f"  DANN 소스(디카) {len(src_t):,}건 / 타깃(폰) {len(tgt_t):,}건 "
+              f"lambda<={args.dann_lambda} hidden={args.dann_hidden}")
+
     ds = FeatDataset(tr["feat"], tr["feat_flip"], tr.get("feat_devaug"), tr["y"],
                      augment=not args.no_flip_aug, aug_prob=args.aug_prob)
     if args.sampler == "weighted":
@@ -418,7 +490,13 @@ def main() -> None:
         cw = torch.tensor(len(tr["y"]) / (num_classes * np.maximum(counts, 1)),
                           dtype=torch.float32)
 
-    opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+    # 도메인 분류기는 원본 특징이 아니라 model.trunk 의 출력을 받는다.
+    # 백본이 동결돼 있어 원본 특징에 GRL 을 걸면 역전된 기울기가 흘러갈
+    # 학습 파라미터가 없다(도메인 손실이 즉시 0 으로 붕괴한다).
+    dom_head = (DomainHead(model.feat_dim, args.dann_hidden, args.dropout)
+                if args.dann else None)
+    params = list(model.parameters()) + (list(dom_head.parameters()) if dom_head else [])
+    opt = torch.optim.AdamW(params, lr=args.lr, weight_decay=args.weight_decay)
     sched = torch.optim.lr_scheduler.ReduceLROnPlateau(opt, mode="max", factor=0.5, patience=5)
 
     best = {"macro_f1": -1.0}
@@ -426,7 +504,11 @@ def main() -> None:
     print(f"\n{'epoch':>5} {'loss':>8} {'macroF1':>8} {'acc':>7} {'QWK':>7}")
     for ep in range(1, args.epochs + 1):
         model.train()
+        if dom_head is not None:
+            dom_head.train()
+        lambd = dann_lambda_at(ep, args.epochs, args.dann_lambda) if args.dann else 0.0
         tot = 0.0
+        dom_tot, dom_n = 0.0, 0
         for xb, yb in loader:
             yb = yb.long()
             out = model(xb)
@@ -436,6 +518,18 @@ def main() -> None:
                 loss = focal_loss(out, yb, args.focal_gamma, cw)
             else:
                 loss = F.cross_entropy(out, yb, weight=cw, label_smoothing=0.05)
+            if dom_head is not None:
+                # 소스/타깃에서 같은 수만큼 뽑아 도메인 배치를 만든다.
+                k = max(1, len(yb) // 2)
+                si = torch.randint(0, len(src_t), (k,))
+                ti = torch.randint(0, len(tgt_t), (k,))
+                xd = torch.cat([src_t[si], tgt_t[ti]], dim=0)
+                yd = torch.cat([torch.zeros(k), torch.ones(k)]).long()
+                rep = model.trunk(xd)
+                dlogit = dom_head(GradientReversal.apply(rep, lambd))
+                dloss = F.cross_entropy(dlogit, yd)
+                loss = loss + dloss
+                dom_tot += dloss.item() * len(yd); dom_n += len(yd)
             opt.zero_grad(); loss.backward(); opt.step()
             tot += loss.item() * len(yb)
 
@@ -449,8 +543,10 @@ def main() -> None:
         else:
             bad += 1
         if ep <= 3 or ep % 5 == 0 or mark:
+            extra = (f"  dom {dom_tot/max(dom_n,1):.3f} lam {lambd:.2f}"
+                     if dom_head is not None else "")
             print(f"{ep:>5} {tot/len(ds):>8.4f} {m['macro_f1']:>8.4f} "
-                  f"{m['accuracy']:>7.4f} {m['qwk']:>7.4f}{mark}")
+                  f"{m['accuracy']:>7.4f} {m['qwk']:>7.4f}{mark}{extra}")
         if args.patience and bad >= args.patience:
             print(f"  조기 종료 (macro-F1 {args.patience}에폭 개선 없음)")
             break
