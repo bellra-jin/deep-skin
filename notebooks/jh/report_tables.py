@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import json
 import statistics as stat
 from pathlib import Path
 
@@ -95,6 +96,28 @@ TABLES: dict[str, dict] = {
              f(tag="기기증강/기준선", target="pore", eval="standard")),
             ("모공 · 전체검증 · 증강",
              f(tag="기기증강/증강", target="pore", eval="standard")),
+        ],
+    },
+    "6.8-6": {
+        "title": "6.8-(6) 적대적 도메인 적응 - 디카 학습 → 폰 검증 (모공 3등급 · 5시드)",
+        "cols": ["macro_f1", "qwk"],
+        "rows": [
+            ("기준선", f(tag="DANN/기준선/폰")),
+            ("DANN λ=1.0", f(tag="DANN/lambda1.0/폰")),
+            ("DANN λ=0.3", f(tag="DANN/lambda0.3/폰")),
+            ("열화 증강", f(tag="DANN/증강/폰")),
+            ("열화 증강 + DANN", f(tag="DANN/증강+DANN/폰")),
+        ],
+    },
+    "6.8-6b": {
+        "title": "6.8-(6) 적대적 도메인 적응 - 전체 검증의 기기별 성능 (모공 3등급 · 5시드)",
+        "cols": ["macro_f1", "dev:디카", "dev:폰"],
+        "rows": [
+            ("기준선", f(tag="DANN/기준선/전체")),
+            ("DANN λ=1.0", f(tag="DANN/lambda1.0/전체")),
+            ("DANN λ=0.3", f(tag="DANN/lambda0.3/전체")),
+            ("열화 증강", f(tag="DANN/증강/전체")),
+            ("열화 증강 + DANN", f(tag="DANN/증강+DANN/전체")),
         ],
     },
     "6.9-1": {
@@ -196,8 +219,28 @@ def fmt(values: list[str], col: str) -> str:
     return f"{stat.mean(nums):.4f}±{stat.stdev(nums):.4f}"
 
 
+def col_values(sel: list[dict], col: str) -> list[str]:
+    """컬럼 값을 뽑는다. "dev:폰" 처럼 쓰면 per_device_f1 JSON 에서 꺼낸다.
+
+    README 6.8-(6) 의 기기별 subset 표가 이 컬럼에 들어 있어,
+    그대로 두면 로그에 값이 있는데도 재현할 수 없다.
+    """
+    if not col.startswith("dev:"):
+        return [r.get(col, "") for r in sel]
+    want = col.split(":", 1)[1]
+    out = []
+    for r in sel:
+        try:
+            per_dev = json.loads(r.get("per_device_f1") or "{}")
+        except ValueError:
+            continue
+        if per_dev.get(want) is not None:
+            out.append(str(per_dev[want]))
+    return out
+
+
 def render(name: str, spec: dict, rows: list[dict]) -> tuple[str, list[str]]:
-    header = ["조건", *spec["cols"], "n"]
+    header = ["조건", *[c.split(":", 1)[-1] for c in spec["cols"]], "n"]
     out = [f"#### {spec['title']}", "",
            "| " + " | ".join(header) + " |",
            "|" + "---|" * len(header)]
@@ -208,7 +251,7 @@ def render(name: str, spec: dict, rows: list[dict]) -> tuple[str, list[str]]:
             missing.append(label)
             out.append(f"| {label} | " + " | ".join(["**없음**"] * len(spec["cols"])) + " | 0 |")
             continue
-        cells = [fmt([r[c] for r in sel], c) for c in spec["cols"]]
+        cells = [fmt(col_values(sel, c), c) for c in spec["cols"]]
         out.append(f"| {label} | " + " | ".join(cells) + f" | {len(sel)} |")
     return "\n".join(out), missing
 

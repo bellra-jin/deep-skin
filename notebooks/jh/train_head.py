@@ -360,6 +360,13 @@ def main() -> None:
     ap.add_argument("--tag", default="", help="실험 로그에 남길 메모")
     args = ap.parse_args()
 
+    if args.dann and args.hidden == 0:
+        raise SystemExit(
+            "--dann 은 --hidden > 0 이 필요합니다." + chr(10) +
+            "백본이 동결돼 있어 head 의 trunk 가 유일하게 학습되는 표현인데, "
+            "--hidden 0 이면 trunk 가 Dropout 뿐이라 GRL 상류에 학습 파라미터가 없습니다. "
+            "(MLPHead·CoralHead 둘 다 해당하므로 --loss 와 무관합니다)")
+
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
 
@@ -519,7 +526,11 @@ def main() -> None:
             else:
                 loss = F.cross_entropy(out, yb, weight=cw, label_smoothing=0.05)
             if dom_head is not None:
-                # 소스/타깃에서 같은 수만큼 뽑아 도메인 배치를 만든다.
+                # 소스/타깃을 같은 수만큼 뽑아 "한 배치로 이어 붙여" 한 번만 forward 한다.
+                # 나눠서 두 번 forward 하면 trunk 의 BatchNorm 이 도메인별로 다른
+                # 통계를 쓰게 되고, 도메인 분류기가 표현이 아니라 BN 통계 차이만으로
+                # 기기를 맞힐 수 있다. 그러면 trunk 가 기기 불변이 되지 않아도
+                # 도메인 손실이 내려가 결과 해석이 무너진다.
                 k = max(1, len(yb) // 2)
                 si = torch.randint(0, len(src_t), (k,))
                 ti = torch.randint(0, len(tgt_t), (k,))
