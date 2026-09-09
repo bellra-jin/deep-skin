@@ -228,7 +228,11 @@ def main() -> None:
     ap = argparse.ArgumentParser(description="크롭 특징 추출 및 캐싱")
     ap.add_argument("--split", choices=["train", "val"], required=True)
     ap.add_argument("--csv", type=Path, default=None,
-                    help="기본: data/processed/cheek_{split}_metadata.csv")
+                    help="기본: data/processed/{csv_prefix}_{split}_metadata.csv")
+    ap.add_argument("--csv-prefix", default="cheek",
+                    help="data/processed/{prefix}_{split}_metadata.csv")
+    ap.add_argument("--label-cols", default="pore,pigmentation",
+                    help="npz 에 labels_{name} 으로 저장할 라벨 컬럼 (콤마 구분)")
     ap.add_argument("--out-dir", type=Path,
                     default=PROJECT_ROOT / "data" / "features")
     ap.add_argument("--arch", default="resnet50",
@@ -254,12 +258,26 @@ def main() -> None:
     args = ap.parse_args()
 
     csv_path = args.csv or (PROJECT_ROOT / "data" / "processed"
-                            / f"cheek_{args.split}_metadata.csv")
+                            / f"{args.csv_prefix}_{args.split}_metadata.csv")
     if not csv_path.exists():
         raise SystemExit(f"메타데이터 CSV 가 없습니다: {csv_path}")
 
-    cols = ["image_path", "id", "device", "angle", "facepart",
-            "pore_label", "pigmentation_label"]
+    label_names = [c.strip() for c in args.label_cols.split(",") if c.strip()]
+    header = pd.read_csv(csv_path, nrows=0).columns.tolist()
+    missing = [f"{n}_label" for n in label_names if f"{n}_label" not in header]
+    if missing:
+        have = [c for c in header if c.endswith("_label")]
+        raise SystemExit(f"CSV 에 라벨 컬럼이 없습니다: {missing} / 있는 컬럼: {have}")
+
+    cols = ["image_path", "id", "device", "angle", "facepart"]
+    cols += [f"{n}_label" for n in label_names]
+    # crop_width 는 학습 시점의 --min-width 필터용. 볼 CSV 처럼 없는 경우도 있다.
+    has_crop_width = "crop_width" in header
+    if has_crop_width:
+        cols.append("crop_width")
+    else:
+        print("  [!] CSV 에 crop_width 가 없어 npz 에 저장하지 않습니다 "
+              "(train_head 의 --min-width 를 쓸 수 없습니다)")
     df = pd.read_csv(csv_path, usecols=cols)
     if args.limit:
         df = df.head(args.limit)
@@ -271,6 +289,7 @@ def main() -> None:
     print(f"\nsplit={args.split}  n={len(df):,}  arch={args.arch}  "
           f"flip={args.flip}  device_aug={args.device_aug}  "
           f"squash={args.squash}  threads={threads}")
+    print(f"  csv_prefix={args.csv_prefix}  labels={label_names}")
 
     net, dim, mean, std, size = build_backbone(args.arch, args.weights, args.image_size)
 
@@ -284,18 +303,25 @@ def main() -> None:
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
     tag = ("_devaug" if args.device_aug else "") + ("_squash" if args.squash else "")
-    out = args.out_dir / f"{args.split}_{arch_slug(args.arch)}_{size}{tag}.npz"
+    # 볼(cheek)은 기존 파일명을 그대로 유지한다 - 이미 뽑아둔 npz 와
+    # README 에 인용된 실험 결과의 재현성을 깨지 않기 위해서다.
+    name_prefix = "" if args.csv_prefix == "cheek" else f"{args.csv_prefix}_"
+    out = (args.out_dir /
+           f"{name_prefix}{args.split}_{arch_slug(args.arch)}_{size}{tag}.npz")
 
     payload = dict(
         feat=feat,
-        labels_pore=df["pore_label"].fillna(-1).astype(np.int16).to_numpy(),
-        labels_pigmentation=df["pigmentation_label"].fillna(-1).astype(np.int16).to_numpy(),
         person=df["id"].astype(str).to_numpy(),
         device=df["device"].fillna(-1).astype(np.int16).to_numpy(),
         angle=df["angle"].fillna(-1).astype(np.int16).to_numpy(),
         facepart=df["facepart"].fillna(-1).astype(np.int16).to_numpy(),
         image_path=df["image_path"].astype(str).to_numpy(),
     )
+    for name in label_names:
+        payload[f"labels_{name}"] = (
+            df[f"{name}_label"].fillna(-1).astype(np.int16).to_numpy())
+    if has_crop_width:
+        payload["crop_width"] = df["crop_width"].fillna(0).astype(np.int32).to_numpy()
     if feat_flip is not None:
         payload["feat_flip"] = feat_flip
 

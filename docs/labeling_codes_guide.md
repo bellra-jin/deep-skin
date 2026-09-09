@@ -46,8 +46,17 @@
 | **7** | 추가 각도 (스마트패드/스마트폰 전용) | `_07` |
 | **8** | 추가 각도 (스마트패드/스마트폰 전용) | `_08` |
 
-- 디지털카메라(device=0)는 각도 0~6까지 사용.
-- 스마트패드(device=1)와 스마트폰(device=2)은 각도 0~8까지 사용.
+- 디지털카메라(device=0)는 각도 **0~6**을 사용.
+- 스마트패드(device=1)와 스마트폰(device=2)은 **0·7·8 세 각도만** 사용.
+
+> 원래 "패드·폰은 0~8까지 사용"이라고 적혀 있었으나, 라벨 108,070건 전수 집계 결과
+> **각도 1~6에는 패드·폰 레코드가 한 건도 없습니다.** 각도 7·8에는 반대로 디카가 없습니다.
+> 즉 각도와 기기는 독립이 아니며, 각도별로 기기를 균형 맞추는 것은 불가능합니다.
+>
+> | 각도 | 0 | 1~6 | 7·8 |
+> |---|---|---|---|
+> | 디카 | O | O | X |
+> | 패드·폰 | O | X | O |
 
 ### `facepart` — 얼굴 부위 코드
 
@@ -92,8 +101,8 @@
 | 1 | 이마 | `forehead_pigmentation` | 0~3 | 이마 색소침착 정도 |
 | 1 | 이마 | `forehead_wrinkle` | 0~4 | 이마 주름 정도 |
 | 2 | 미간 | `glabellus_wrinkle` | 0~2 | 미간 주름 정도 |
-| 3 | 왼쪽 눈가 | `l_perocular_wrinkle` | 0~5 | 왼쪽 눈가 주름 정도 |
-| 4 | 오른쪽 눈가 | `r_perocular_wrinkle` | 0~5 | 오른쪽 눈가 주름 정도 |
+| 3 | 왼쪽 눈가 | `l_perocular_wrinkle` | 0~6 | 왼쪽 눈가 주름 정도 |
+| 4 | 오른쪽 눈가 | `r_perocular_wrinkle` | 0~6 | 오른쪽 눈가 주름 정도 |
 | 5 | 왼쪽 볼 | `l_cheek_pigmentation` | 0~5 | 왼쪽 볼 색소침착 정도 |
 | 5 | 왼쪽 볼 | `l_cheek_pore` | 0~5 | 왼쪽 볼 모공 정도 |
 | 6 | 오른쪽 볼 | `r_cheek_pigmentation` | 0~5 | 오른쪽 볼 색소침착 정도 |
@@ -117,10 +126,15 @@
 > - `forehead_wrinkle`: 최대 4
 > - `glabellus_wrinkle`: 최대 2
 > - `lip_dryness`: 최대 4
-> - `l_perocular_wrinkle`, `r_perocular_wrinkle`: 최대 5
+> - `l_perocular_wrinkle`, `r_perocular_wrinkle`: **최대 6** (7등급)
 > - `l_cheek_pigmentation`, `r_cheek_pigmentation`: 최대 5
 > - `l_cheek_pore`, `r_cheek_pore`: 최대 5
 > - `chin_sagging`: 최대 5
+>
+> 눈가 주름은 원래 "최대 5"로 적혀 있었으나, 라벨 JSON 전수 확인에서 **등급 6이
+> train 1,471건(10.2%) / val 205건(11.3%)** 존재합니다. 6등급 헤드로 학습하면
+> 인덱스 범위를 벗어나고, severity 매핑에서도 등급 6이 누락되면 해당 부위 결과가
+> 통째로 버려집니다.
 
 ### `acne` (여드름) — facepart=0 전용
 
