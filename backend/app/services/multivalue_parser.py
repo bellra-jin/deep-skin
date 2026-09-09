@@ -47,12 +47,26 @@ _ZERO_12_34_5 = {
     5: "severe",
 }
 
+# 눈가 주름은 0~6 (7등급) 이다. docs/labeling_codes_guide.md 참고.
+# _ZERO_12_34_5 (0~5) 를 쓰면 등급 6 에서 grade_to_severity 가 None 을 돌려주고
+# 해당 부위 결과가 통째로 버려진다("unknown annotation grade skipped").
+# 기존 테이블의 규칙(0 은 normal, 최고 등급은 severe, 중간을 나눔)을 따른다.
+_ZERO_12_345_6 = {
+    0: "normal",
+    1: "mild",
+    2: "mild",
+    3: "moderate",
+    4: "moderate",
+    5: "moderate",
+    6: "severe",
+}
+
 _SEVERITY_BY_ANNOTATION = {
     "forehead_pigmentation": {0: "normal", 1: "mild", 2: "moderate", 3: "severe"},
     "forehead_wrinkle": {0: "normal", 1: "mild", 2: "mild", 3: "moderate", 4: "severe"},
     "glabellus_wrinkle": {0: "normal", 1: "mild", 2: "severe"},
-    "l_perocular_wrinkle": _ZERO_12_34_5,
-    "r_perocular_wrinkle": _ZERO_12_34_5,
+    "l_perocular_wrinkle": _ZERO_12_345_6,
+    "r_perocular_wrinkle": _ZERO_12_345_6,
     "l_cheek_pore": _ZERO_12_34_5,
     "l_cheek_pigmentation": _ZERO_12_34_5,
     "r_cheek_pore": _ZERO_12_34_5,
