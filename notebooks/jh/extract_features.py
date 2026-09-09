@@ -110,12 +110,17 @@ def degrade_to_phone(img: Image.Image, idx: int) -> Image.Image:
 
 class CropDataset(Dataset):
     def __init__(self, df: pd.DataFrame, image_size: int, flip: bool,
-                 mean=IMAGENET_MEAN, std=IMAGENET_STD, degrade: bool = False):
+                 mean=IMAGENET_MEAN, std=IMAGENET_STD, degrade: bool = False,
+                 squash: bool = False):
         self.paths = df["image_path"].tolist()
         self.flip = flip
         self.degrade = degrade
+        # squash: 종횡비를 무시한 강제 정사각형. 추론 엔진의
+        # transforms.Resize((N, N)) 와 동일하며, ResizeAndPad 와 달리 여백을 두지 않는다.
+        resize = (transforms.Resize((image_size, image_size))
+                  if squash else ResizeAndPad(image_size))
         self.tf = transforms.Compose([
-            ResizeAndPad(image_size),
+            resize,
             transforms.ToTensor(),
             transforms.Normalize(mean, std),
         ])
@@ -242,6 +247,9 @@ def main() -> None:
                     help="좌우반전 특징도 함께 저장 (train 권장)")
     ap.add_argument("--device-aug", action="store_true",
                     help="디카->폰 열화본의 특징을 추출해 _devaug 사이드카로 저장")
+    ap.add_argument("--squash", action="store_true",
+                    help="ResizeAndPad 대신 종횡비를 무시한 강제 정사각형 리사이즈 "
+                         "(추론 엔진의 transforms.Resize((N,N)) 와 동일)")
     ap.add_argument("--limit", type=int, default=0, help="디버그용 상한")
     args = ap.parse_args()
 
@@ -261,11 +269,13 @@ def main() -> None:
 
     threads = args.threads or torch.get_num_threads()
     print(f"\nsplit={args.split}  n={len(df):,}  arch={args.arch}  "
-          f"flip={args.flip}  device_aug={args.device_aug}  threads={threads}")
+          f"flip={args.flip}  device_aug={args.device_aug}  "
+          f"squash={args.squash}  threads={threads}")
 
     net, dim, mean, std, size = build_backbone(args.arch, args.weights, args.image_size)
 
-    ds = CropDataset(df, size, args.flip, mean, std, degrade=args.device_aug)
+    ds = CropDataset(df, size, args.flip, mean, std,
+                     degrade=args.device_aug, squash=args.squash)
     loader = DataLoader(ds, batch_size=args.batch_size, shuffle=False,
                         num_workers=args.num_workers, pin_memory=False)
 
@@ -273,7 +283,7 @@ def main() -> None:
     feat, feat_flip = extract(net, loader, dim, len(df), args.flip, threads)
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
-    tag = "_devaug" if args.device_aug else ""
+    tag = ("_devaug" if args.device_aug else "") + ("_squash" if args.squash else "")
     out = args.out_dir / f"{args.split}_{arch_slug(args.arch)}_{size}{tag}.npz"
 
     payload = dict(

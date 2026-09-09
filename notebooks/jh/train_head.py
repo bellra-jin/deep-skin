@@ -41,6 +41,18 @@ MERGE_3 = {0: 0, 1: 0, 2: 1, 3: 2, 4: 2, 5: 2}
 MERGE_3_LUT = np.array([MERGE_3[g] for g in range(6)], dtype=np.int64)
 DEVICE_NAME = {0: "디카", 1: "패드", 2: "폰"}
 
+# 변형 특징 파일의 접미사. 자동 선택이 이들을 기본 특징과 헷갈리지 않게 한다.
+#   _devaug  기기 열화 사이드카 (원본과 짝을 이룸)
+#   _squash  종횡비 무시 리사이즈로 뽑은 별도 특징 세트
+FEAT_VARIANTS = ("_devaug", "_squash")
+
+
+def _matches_variant(stem: str, want: str) -> bool:
+    """want 가 빈 문자열이면 변형이 아닌 기본 특징만 참."""
+    if want:
+        return stem.endswith(want)
+    return not any(stem.endswith(v) for v in FEAT_VARIANTS)
+
 
 # --------------------------------------------------------------------------- #
 # 데이터
@@ -168,14 +180,32 @@ def coral_predict(logits):
 # --------------------------------------------------------------------------- #
 # 평가
 # --------------------------------------------------------------------------- #
-def evaluate(model, feat, y, loss_kind, batch=1024):
+def evaluate(model, feat, y, loss_kind, feat_flip=None, batch=1024):
+    """feat_flip 이 주어지면 좌우반전 출력을 평균한다 (추론 엔진과 동일한 TTA).
+
+    로짓이 아니라 확률을 평균한다. 추론 엔진이
+    probs = (softmax(f(x)) + softmax(f(flip(x)))) / 2 를 쓰므로 그대로 맞춘다.
+    CORAL 은 softmax 가 아니라 sigmoid 출력을 평균한 뒤 임계 처리한다.
+    """
     model.eval()
     preds = []
     with torch.inference_mode():
         for i in range(0, len(y), batch):
             xb = torch.from_numpy(np.ascontiguousarray(feat[i:i + batch]))
             out = model(xb)
-            p = coral_predict(out) if loss_kind == "coral" else out.argmax(1)
+            xf = None
+            if feat_flip is not None:
+                xf = torch.from_numpy(np.ascontiguousarray(feat_flip[i:i + batch]))
+            if loss_kind == "coral":
+                q = torch.sigmoid(out)
+                if xf is not None:
+                    q = (q + torch.sigmoid(model(xf))) / 2
+                p = (q > 0.5).sum(dim=1)
+            else:
+                q = torch.softmax(out, dim=-1)
+                if xf is not None:
+                    q = (q + torch.softmax(model(xf), dim=-1)) / 2
+                p = q.argmax(1)
             preds.append(p.numpy())
     p = np.concatenate(preds)
     return {
@@ -210,6 +240,10 @@ def main() -> None:
                     help="기기 열화 특징(_devaug 사이드카)을 학습에 섞는다")
     ap.add_argument("--aug-prob", type=float, default=0.5,
                     help="열화본을 쓸 확률 (0.3 / 0.5 / 0.7 비교 권장)")
+    ap.add_argument("--squash", action="store_true",
+                    help="종횡비 무시 리사이즈로 뽑은 _squash 특징 세트를 쓴다")
+    ap.add_argument("--tta-flip", action="store_true",
+                    help="평가 시 좌우반전 특징의 확률을 평균한다 (추론 엔진과 동일한 TTA)")
     ap.add_argument("--seed", type=int, default=20260908)
     ap.add_argument("--results-csv", type=Path,
                     default=PROJECT_ROOT / "results" / "head_experiments.csv")
@@ -219,12 +253,13 @@ def main() -> None:
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
 
-    suffix = f"{args.arch}_{args.image_size}.npz"
+    variant = "_squash" if args.squash else ""
+    suffix = f"{args.arch}_{args.image_size}{variant}.npz"
     if not (args.features_dir / f"train_{suffix}").exists():
         # --image-size 를 안 줘도 해당 arch 의 특징 파일을 알아서 찾는다.
-        # _devaug 사이드카는 본 특징 파일이 아니므로 후보에서 뺀다.
+        # 변형 특징(_devaug 사이드카, _squash)이 기본 특징과 섞이지 않게 거른다.
         cand = sorted(c for c in args.features_dir.glob(f"train_{args.arch}_*.npz")
-                      if not c.stem.endswith("_devaug"))
+                      if _matches_variant(c.stem, variant))
         if len(cand) == 1:
             suffix = cand[0].name[len("train_"):]
             print(f"  특징 파일 자동 선택: {cand[0].name}")
@@ -252,6 +287,11 @@ def main() -> None:
     val_dev = 2 if args.eval == "device" else None
     tr = prepare(tr_pack, args.target, args.grades, train_dev)
     va = prepare(va_pack, args.target, args.grades, val_dev)
+
+    if args.tta_flip and va["feat_flip"] is None:
+        raise SystemExit(
+            f"검증 특징에 feat_flip 이 없습니다: val_{suffix}. "
+            "extract_features.py 를 --split val --flip 으로 다시 실행하세요.")
 
     num_classes = args.grades
     counts = np.bincount(tr["y"], minlength=num_classes)
@@ -324,7 +364,8 @@ def main() -> None:
             opt.zero_grad(); loss.backward(); opt.step()
             tot += loss.item() * len(yb)
 
-        m, _ = evaluate(model, va["feat"], va["y"], args.loss)
+        m, _ = evaluate(model, va["feat"], va["y"], args.loss,
+                        feat_flip=va["feat_flip"] if args.tta_flip else None)
         sched.step(m["macro_f1"])
         mark = ""
         if m["macro_f1"] > best["macro_f1"]:
@@ -351,7 +392,10 @@ def main() -> None:
             sel = va["device"] == d
             if sel.sum() < 10:
                 continue
-            m, _ = evaluate(model, va["feat"][sel], va["y"][sel], args.loss)
+            m, _ = evaluate(model, va["feat"][sel], va["y"][sel], args.loss,
+                            feat_flip=(va["feat_flip"][sel]
+                                       if args.tta_flip and va["feat_flip"] is not None
+                                       else None))
             per_dev[DEVICE_NAME[d]] = round(m["macro_f1"], 4)
         if per_dev:
             print("  기기별 macro-F1: " + "  ".join(f"{k} {v}" for k, v in per_dev.items()))
