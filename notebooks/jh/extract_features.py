@@ -26,6 +26,7 @@ CUDA 미지원 환경(내장 GPU)에서 ResNet-50 전체 미세조정은 에폭�
 from __future__ import annotations
 
 import argparse
+import io
 import time
 from pathlib import Path
 
@@ -33,7 +34,7 @@ import numpy as np
 import pandas as pd
 import torch
 import torch.nn as nn
-from PIL import Image, ImageOps
+from PIL import Image, ImageFilter, ImageOps
 from torch.utils.data import DataLoader, Dataset
 from torchvision import models, transforms
 
@@ -64,11 +65,55 @@ class ResizeAndPad:
         )
 
 
+# 열화 강도. 조정 이력은 degrade_to_phone 독스트링 참조.
+DOWNSCALE = 3        # 1차: 2
+BLUR_RADIUS = 0.9    # 1차: 0.6
+QUALITY_MIN = 40     # 1차: 55  (범위는 항상 +20)
+
+
+def degrade_to_phone(img: Image.Image, idx: int) -> Image.Image:
+    """디카 촬영본을 스마트폰 촬영본에 가깝게 열화시킨다.
+
+    폰 이미지의 세 가지 특징을 각각 흉내낸다.
+      1. 실효 해상도 저하 -> 1/DOWNSCALE 로 줄였다 되돌리기
+      2. 렌즈/후처리로 인한 미세 질감 손실 -> 가우시안 블러
+      3. 강한 JPEG 압축 아티팩트 -> 품질 QUALITY_MIN~+20 으로 재인코딩
+
+    품질값은 난수가 아니라 인덱스에서 결정론적으로 뽑는다.
+    캐싱된 특징은 한 번 뽑으면 고정이므로, 재현 가능해야 실험을 비교할 수 있다.
+
+    강도 조정 이력
+    --------------
+    1차 (DOWNSCALE 2, BLUR 0.6, QUALITY_MIN 55): 열화가 약했다.
+        크롭 원본이 약 600px 인데 ResizeAndPad 가 어차피 256px 로 줄이므로
+        1/2 다운스케일이 최종 리사이즈에 흡수된다. 원본 대비 특징 코사인
+        유사도가 0.995 에 그쳤고, 폰 검증 macro-F1 은 0.505 -> 0.524 에서 정체했다.
+    2차 (현재값): 다운스케일과 블러를 키우고 압축을 세게 걸었다.
+    """
+    w, h = img.size
+
+    # 1) 다운스케일 후 재확대
+    img = img.resize((max(1, w // DOWNSCALE), max(1, h // DOWNSCALE)),
+                     Image.Resampling.BILINEAR)
+    img = img.resize((w, h), Image.Resampling.BILINEAR)
+
+    # 2) 블러
+    img = img.filter(ImageFilter.GaussianBlur(radius=BLUR_RADIUS))
+
+    # 3) JPEG 재압축 (인덱스 기반 결정론적 분산)
+    quality = QUALITY_MIN + (idx * 7) % 21
+    buf = io.BytesIO()
+    img.save(buf, format="JPEG", quality=quality)
+    buf.seek(0)
+    return Image.open(buf).convert("RGB")
+
+
 class CropDataset(Dataset):
     def __init__(self, df: pd.DataFrame, image_size: int, flip: bool,
-                 mean=IMAGENET_MEAN, std=IMAGENET_STD):
+                 mean=IMAGENET_MEAN, std=IMAGENET_STD, degrade: bool = False):
         self.paths = df["image_path"].tolist()
         self.flip = flip
+        self.degrade = degrade
         self.tf = transforms.Compose([
             ResizeAndPad(image_size),
             transforms.ToTensor(),
@@ -80,6 +125,8 @@ class CropDataset(Dataset):
 
     def __getitem__(self, i: int):
         img = Image.open(self.paths[i]).convert("RGB")
+        if self.degrade:
+            img = degrade_to_phone(img, i)
         x = self.tf(img)
         if self.flip:
             return x, self.tf(ImageOps.mirror(img))
@@ -193,6 +240,8 @@ def main() -> None:
                     help="torch CPU 스레드 수. 0이면 자동.")
     ap.add_argument("--flip", action="store_true",
                     help="좌우반전 특징도 함께 저장 (train 권장)")
+    ap.add_argument("--device-aug", action="store_true",
+                    help="디카->폰 열화본의 특징을 추출해 _devaug 사이드카로 저장")
     ap.add_argument("--limit", type=int, default=0, help="디버그용 상한")
     args = ap.parse_args()
 
@@ -212,11 +261,11 @@ def main() -> None:
 
     threads = args.threads or torch.get_num_threads()
     print(f"\nsplit={args.split}  n={len(df):,}  arch={args.arch}  "
-          f"flip={args.flip}  threads={threads}")
+          f"flip={args.flip}  device_aug={args.device_aug}  threads={threads}")
 
     net, dim, mean, std, size = build_backbone(args.arch, args.weights, args.image_size)
 
-    ds = CropDataset(df, size, args.flip, mean, std)
+    ds = CropDataset(df, size, args.flip, mean, std, degrade=args.device_aug)
     loader = DataLoader(ds, batch_size=args.batch_size, shuffle=False,
                         num_workers=args.num_workers, pin_memory=False)
 
@@ -224,7 +273,8 @@ def main() -> None:
     feat, feat_flip = extract(net, loader, dim, len(df), args.flip, threads)
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
-    out = args.out_dir / f"{args.split}_{arch_slug(args.arch)}_{size}.npz"
+    tag = "_devaug" if args.device_aug else ""
+    out = args.out_dir / f"{args.split}_{arch_slug(args.arch)}_{size}{tag}.npz"
 
     payload = dict(
         feat=feat,

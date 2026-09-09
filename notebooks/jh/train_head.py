@@ -71,21 +71,33 @@ def prepare(pack: dict, target: str, grades: int, device_filter: int | None):
         "person": pack["person"][idx],
     }
     out["feat_flip"] = pack["feat_flip"][idx] if "feat_flip" in pack else None
+    out["feat_devaug"] = pack["feat_devaug"][idx] if "feat_devaug" in pack else None
     return out
 
 
 class FeatDataset(Dataset):
-    """flip 특징이 있으면 학습 시 50% 확률로 바꿔 쓴다 (캐싱 환경의 유일한 증강)."""
+    """캐싱 환경의 증강 - 좌우반전본과 기기 열화본을 확률적으로 바꿔 쓴다.
 
-    def __init__(self, feat, feat_flip, y, augment: bool):
-        self.feat, self.feat_flip, self.y = feat, feat_flip, y
-        self.augment = augment and feat_flip is not None
+    한 샘플에 대해 한 번에 하나만 고른다(원본 / 반전 / 열화).
+    섞어서 적용할 수는 없다 - 특징이 이미 뽑혀 있기 때문이다.
+    """
+
+    def __init__(self, feat, feat_flip, feat_devaug, y,
+                 augment: bool, aug_prob: float = 0.5):
+        self.feat, self.y = feat, y
+        self.feat_flip = feat_flip if augment else None
+        self.feat_devaug = feat_devaug
+        self.aug_prob = aug_prob
 
     def __len__(self) -> int:
         return len(self.y)
 
     def __getitem__(self, i):
-        x = self.feat_flip[i] if (self.augment and np.random.rand() < 0.5) else self.feat[i]
+        x = self.feat[i]
+        if self.feat_devaug is not None and np.random.rand() < self.aug_prob:
+            x = self.feat_devaug[i]
+        elif self.feat_flip is not None and np.random.rand() < 0.5:
+            x = self.feat_flip[i]
         return torch.from_numpy(np.ascontiguousarray(x)), int(self.y[i])
 
 
@@ -194,6 +206,10 @@ def main() -> None:
     ap.add_argument("--weight-decay", type=float, default=1e-4)
     ap.add_argument("--patience", type=int, default=15)
     ap.add_argument("--no-flip-aug", action="store_true")
+    ap.add_argument("--device-aug", action="store_true",
+                    help="기기 열화 특징(_devaug 사이드카)을 학습에 섞는다")
+    ap.add_argument("--aug-prob", type=float, default=0.5,
+                    help="열화본을 쓸 확률 (0.3 / 0.5 / 0.7 비교 권장)")
     ap.add_argument("--seed", type=int, default=20260908)
     ap.add_argument("--results-csv", type=Path,
                     default=PROJECT_ROOT / "results" / "head_experiments.csv")
@@ -206,7 +222,9 @@ def main() -> None:
     suffix = f"{args.arch}_{args.image_size}.npz"
     if not (args.features_dir / f"train_{suffix}").exists():
         # --image-size 를 안 줘도 해당 arch 의 특징 파일을 알아서 찾는다.
-        cand = sorted(args.features_dir.glob(f"train_{args.arch}_*.npz"))
+        # _devaug 사이드카는 본 특징 파일이 아니므로 후보에서 뺀다.
+        cand = sorted(c for c in args.features_dir.glob(f"train_{args.arch}_*.npz")
+                      if not c.stem.endswith("_devaug"))
         if len(cand) == 1:
             suffix = cand[0].name[len("train_"):]
             print(f"  특징 파일 자동 선택: {cand[0].name}")
@@ -215,6 +233,20 @@ def main() -> None:
                              + "\n  ".join(c.name for c in cand))
     tr_pack = load_npz(args.features_dir / f"train_{suffix}")
     va_pack = load_npz(args.features_dir / f"val_{suffix}")
+
+    # 열화 특징은 학습 세트에만 붙인다. 검증은 실제 기기 분포 그대로여야 한다.
+    if args.device_aug:
+        aug_name = f"train_{suffix}".replace(".npz", "_devaug.npz")
+        aug_path = args.features_dir / aug_name
+        if not aug_path.exists():
+            raise SystemExit(
+                f"열화 특징 파일이 없습니다: {aug_path}\n"
+                "먼저 extract_features.py 를 --device-aug 로 실행하세요.")
+        aug_pack = load_npz(aug_path)
+        if len(aug_pack["feat"]) != len(tr_pack["feat"]):
+            raise SystemExit("열화 특징의 행 수가 원본과 다릅니다. 같은 CSV로 다시 추출하세요.")
+        tr_pack["feat_devaug"] = aug_pack["feat"]
+        print(f"  열화 특징 사이드카: {aug_path.name}  (aug_prob={args.aug_prob})")
 
     train_dev = 0 if args.eval == "device" else None
     val_dev = 2 if args.eval == "device" else None
@@ -243,8 +275,11 @@ def main() -> None:
         pack["feat"] = ((pack["feat"] - mu) / sd).astype(np.float32)
         if pack["feat_flip"] is not None:
             pack["feat_flip"] = ((pack["feat_flip"] - mu) / sd).astype(np.float32)
+        if pack.get("feat_devaug") is not None:
+            pack["feat_devaug"] = ((pack["feat_devaug"] - mu) / sd).astype(np.float32)
 
-    ds = FeatDataset(tr["feat"], tr["feat_flip"], tr["y"], augment=not args.no_flip_aug)
+    ds = FeatDataset(tr["feat"], tr["feat_flip"], tr.get("feat_devaug"), tr["y"],
+                     augment=not args.no_flip_aug, aug_prob=args.aug_prob)
     if args.sampler == "weighted":
         w = (1.0 / np.maximum(counts, 1))[tr["y"]]
         sampler = WeightedRandomSampler(torch.DoubleTensor(w), len(w), replacement=True)
