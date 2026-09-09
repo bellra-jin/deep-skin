@@ -58,26 +58,56 @@ FRONT_ANGLES = {0, 1, 2}
 
 CSV_COLUMNS = [
     "image_path", "device", "angle", "is_front",
-    "n_eyes_detected", "frontality_score",
+    "n_eyes_detected", "frontality_score", "dx", "dy",
     "detected_parts", "missing_parts",
 ]
 
 
-def frontality_score(dets_by_part: Dict[str, Dict[str, Any]]) -> Optional[float]:
-    """0에 가까울수록 정면. 필요한 부위가 없으면 None.
+def frontality_offsets(
+    dets_by_part: Dict[str, Dict[str, Any]]
+) -> Optional[tuple[float, float]]:
+    """(dx, dy) 를 반환. 필요한 부위가 없으면 None.
 
-    미간이 두 볼 중심의 중점에 있으면 정면이고,
-    고개가 돌수록 한쪽으로 밀린다. 볼 간격으로 나눠 얼굴 크기에 무관하게 만든다.
+    가로 dx: 미간이 두 볼 중점에서 좌우로 벗어난 정도.
+             미간이 중점에 있으면 정면이고, 고개가 돌수록 한쪽으로 밀린다.
+    세로 dy: 미간이 두 볼 중점에서 위아래로 벗어난 정도.
+             고개를 숙이면 좌우 대칭은 유지된 채 세로로 밀리므로
+             가로 항만으로는 잡히지 않는다.
+    둘 다 볼 간격(span)으로 나눠 얼굴 크기에 무관하게 만든다.
+    dy 는 기준선이 0 이 아니다 - 미간은 원래 볼보다 위에 있다.
+
+    세로 항은 판정에 쓰지 않는다 (측정 결과 도움이 안 됐다)
+    ------------------------------------------------------
+    "아래를 본 사진(angle 2)이 66.7% 로 약한 것은 고개를 숙이면 세로로 밀리기
+    때문"이라는 가설로 dy 를 추가했으나, 270장 실측에서 기각됐다.
+    정면 표본 중앙값 m 을 뺀 dy 의 각도별 중앙값은
+      angle 0 -0.0667 / angle 1 +0.0451 / angle 2 -0.0204
+      angle 3~6 -0.035 ~ -0.001 / angle 7·8 -0.112 ~ -0.122
+    로, angle 2 가 정면(angle 0)보다 오히려 0 에 가깝다. 세로 항이 분리해 주는
+    것은 angle 7·8 뿐인데 그건 |dx| 가 이미 잡는다.
+    오탐 0 을 유지하면서 angle 2 를 올리는 임계값 조합이 없었고,
+    (|dx|<=0.05 & |dy-m|<=0.15) 는 전체 94.8% -> 93.3%, 미탐 14 -> 18 로 나빠졌다.
+    dx/dy 는 CSV 에 계속 기록해 두되 판정은 |dx| 단독으로 한다.
     """
     need = ("glabella", "left_cheek", "right_cheek")
     if not all(k in dets_by_part for k in need):
         return None
-    cx = lambda k: (dets_by_part[k]["bbox_xyxy"][0] + dets_by_part[k]["bbox_xyxy"][2]) / 2
+    box = lambda k: dets_by_part[k]["bbox_xyxy"]
+    cx = lambda k: (box(k)[0] + box(k)[2]) / 2
+    cy = lambda k: (box(k)[1] + box(k)[3]) / 2
     lc, rc = cx("left_cheek"), cx("right_cheek")
     span = abs(rc - lc)
     if span < 1e-6:
         return None
-    return (cx("glabella") - (lc + rc) / 2) / span
+    dx = (cx("glabella") - (lc + rc) / 2) / span
+    dy = (cy("glabella") - (cy("left_cheek") + cy("right_cheek")) / 2) / span
+    return dx, dy
+
+
+def frontality_score(dets_by_part: Dict[str, Dict[str, Any]]) -> Optional[float]:
+    """기존 인터페이스 유지 - 가로 항만 반환한다."""
+    off = frontality_offsets(dets_by_part)
+    return None if off is None else off[0]
 
 
 # --------------------------------------------------------------------------- #
@@ -124,7 +154,8 @@ def collect(picks: list[dict], data_root: Path, out_csv: Path) -> None:
             continue
         best = det.detect_best_per_part(str(p))
         n_eyes = sum(1 for k in ("left_eye", "right_eye") if k in best)
-        score = frontality_score(best)
+        off = frontality_offsets(best)
+        score = None if off is None else off[0]
         detected = [k for k in ALL_PARTS if k in best]
         missing = [k for k in ALL_PARTS if k not in best]
         angle = int(r["angle"])
@@ -135,6 +166,8 @@ def collect(picks: list[dict], data_root: Path, out_csv: Path) -> None:
             "is_front": int(angle in FRONT_ANGLES),
             "n_eyes_detected": n_eyes,
             "frontality_score": "" if score is None else round(score, 5),
+            "dx": "" if off is None else round(off[0], 5),
+            "dy": "" if off is None else round(off[1], 5),
             "detected_parts": ",".join(detected),
             "missing_parts": ",".join(missing),
         })
