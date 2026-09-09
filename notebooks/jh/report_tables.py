@@ -79,6 +79,24 @@ TABLES: dict[str, dict] = {
             ("색소침착 · DINOv3", f(tag="DINOv3/도메인갭", target="pigmentation", eval="device")),
         ],
     },
+    "6.8-5": {
+        "title": "6.8-(5) 기기 열화 증강 (3등급 · DINOv3 · 5시드)",
+        "cols": ["macro_f1"],
+        "rows": [
+            ("모공 · 디카 학습 → 폰 검증 · 기준선",
+             f(tag="기기증강/기준선", target="pore", eval="device")),
+            ("모공 · 디카 학습 → 폰 검증 · 증강",
+             f(tag="기기증강/증강", target="pore", eval="device")),
+            ("색소침착 · 디카 학습 → 폰 검증 · 기준선",
+             f(tag="기기증강/기준선", target="pigmentation", eval="device")),
+            ("색소침착 · 디카 학습 → 폰 검증 · 증강",
+             f(tag="기기증강/증강", target="pigmentation", eval="device")),
+            ("모공 · 전체검증 · 기준선",
+             f(tag="기기증강/기준선", target="pore", eval="standard")),
+            ("모공 · 전체검증 · 증강",
+             f(tag="기기증강/증강", target="pore", eval="standard")),
+        ],
+    },
     "6.9-1": {
         "title": "6.9 눈가 - 볼 결론의 전이 여부",
         "cols": ["macro_f1", "qwk"],
@@ -143,8 +161,6 @@ TABLES: dict[str, dict] = {
 
 # 로그에서 재현할 수 없는 표.  침묵하지 않고 이유와 함께 보고한다.
 NOT_REPRODUCIBLE = {
-    "6.8-5": "기기 열화 증강 5시드 비교 - 실험 로그를 오염시키지 않으려고 임시 CSV 로 돌렸고, "
-             "본 로그에 병합되지 않았다. 로그의 동명 행은 단일 시드 탐색 결과다.",
     "6.9-0": "눈가 크롭 건수·오류 수 - 학습 로그가 아니라 crop.py 산출물이다.",
     "6.10-3": "라벨 문서 오류 3건 - facepart_audit.py 의 전수 집계 결과다.",
     "7.4-1": "YOLO 혼동행렬 - 팀의 학습 산출물(images/yolo_confusion_matrix.png)이다.",
