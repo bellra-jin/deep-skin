@@ -50,8 +50,23 @@ class DinoInferenceEngine:
             transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
         ])
         
+        # 부위별 등급 상한이 다르다 (docs/labeling_codes_guide.md 참고).
+        #   미간 0~2 / 이마 색소 0~3 / 이마 주름·입술 0~4
+        #   눈가 주름·볼 모공·볼 색소·턱 처짐 0~5
+        # severity 어휘는 계약(backend/docs/ai_inference_contract.md)상
+        # normal / mild / moderate / severe 네 가지로 고정이므로 그 안에서 매핑한다.
+        # 값 자체는 multivalue_parser._ZERO_12_34_5 (dev JSON 경로가 쓰는 정본)와 동일하다.
+        #
+        # 기존 map 은 두 가지로 새고 있었다.
+        #   등급 5 -> .get(pred, "unknown") 이 걸려 "unknown"
+        #   등급 4 -> 어휘 밖 값 "very_severe"
+        # 소비처(recommendation_service/report_service/report_cards)가 모두
+        # _SEVERITY_ORDER.get(severity, 0) 패턴이라, 어휘 밖 값은 예외 없이
+        # 가장 낮은 등급으로 조용히 강등된다. 즉 최상위 등급이 정렬에서 최하위로
+        # 취급되고 있었다.
         self.severity_map = {
-            0: "normal", 1: "mild", 2: "moderate", 3: "severe", 4: "very_severe"
+            0: "normal", 1: "mild", 2: "mild",
+            3: "moderate", 4: "moderate", 5: "severe",
         }
 
     def _setup_dinov3_path(self):
