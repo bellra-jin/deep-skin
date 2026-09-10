@@ -236,3 +236,5 @@ extract_aihub.ps1
 # 작업 인계서 (개인 메모)
 HANDOFF.md
 TASK_*.md
+
+COMMIT_*.txt
