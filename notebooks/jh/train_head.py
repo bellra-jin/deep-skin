@@ -377,6 +377,7 @@ def evaluate(model, feat, y, loss_kind, feat_flip=None, batch=1024):
     model.eval()
     preds = []
     scores = []
+    probs_all = []
     with torch.inference_mode():
         for i in range(0, len(y), batch):
             xb = torch.from_numpy(np.ascontiguousarray(feat[i:i + batch]))
@@ -395,6 +396,7 @@ def evaluate(model, feat, y, loss_kind, feat_flip=None, batch=1024):
                     q = (q + torch.softmax(model(xf), dim=-1)) / 2
                 p = q.argmax(1)
             preds.append(p.numpy())
+            probs_all.append(q.numpy())
             # 서수 점수: CE 는 등급 기대값, CORAL 은 시그모이드 합.
             # 인접 등급쌍을 1대1로 가르는 능력을 재는 데 argmax 보다 낫다.
             if loss_kind == "coral":
@@ -404,11 +406,12 @@ def evaluate(model, feat, y, loss_kind, feat_flip=None, batch=1024):
                 scores.append((q * idx_v).sum(dim=1).numpy())
     p = np.concatenate(preds)
     sc = np.concatenate(scores)
+    pr = np.concatenate(probs_all, axis=0) if probs_all else np.zeros((0, 0))
     return {
         "macro_f1": f1_score(y, p, average="macro", zero_division=0),
         "accuracy": accuracy_score(y, p),
         "qwk": cohen_kappa_score(y, p, weights="quadratic"),
-    }, p, sc
+    }, p, sc, pr
 
 
 def main() -> None:
@@ -428,6 +431,10 @@ def main() -> None:
     ap.add_argument("--min-width", type=int, default=0,
                     help="크롭 폭 하한. 0이면 필터 없음. "
                          "npz 에 crop_width 가 없으면 무시하고 경고한다.")
+    ap.add_argument("--probs-out", type=Path, default=None,
+                    help="최고 에폭의 검증 확률을 npz 로 저장한다 "
+                         "(신뢰도·calibration 분석용). person 도 함께 저장해 "
+                         "사람 단위 분할이 가능하게 한다.")
     ap.add_argument("--confusion-out", type=Path, default=None,
                     help="최고 에폭의 검증 혼동행렬을 CSV 로 누적한다 "
                          "(인접 등급 분리도 측정용)")
@@ -659,6 +666,7 @@ def main() -> None:
     best_reg: dict = {}
     best_pred = None
     best_score = None
+    best_probs = None
     va_reg_true = va["reg"] if args.reg_target else None
     best_epoch, bad, t0 = 0, 0, time.time()
     print(f"\n{'epoch':>5} {'loss':>8} {'macroF1':>8} {'acc':>7} {'QWK':>7}")
@@ -706,7 +714,7 @@ def main() -> None:
             opt.zero_grad(); loss.backward(); opt.step()
             tot += loss.item() * len(yb)
 
-        m, pred_now, score_now = evaluate(
+        m, pred_now, score_now, probs_now = evaluate(
             model, va["feat"], va["y"], args.loss,
             feat_flip=va["feat_flip"] if args.tta_flip else None)
         rm = {}
@@ -725,6 +733,7 @@ def main() -> None:
             best_reg = dict(rm)
             best_pred = pred_now
             best_score = score_now
+            best_probs = probs_now
             mark = "  *"
         else:
             bad += 1
@@ -752,7 +761,7 @@ def main() -> None:
             sel = va["device"] == d
             if sel.sum() < 10:
                 continue
-            m, _, _ = evaluate(model, va["feat"][sel], va["y"][sel], args.loss,
+            m, _, _, _ = evaluate(model, va["feat"][sel], va["y"][sel], args.loss,
                             feat_flip=(va["feat_flip"][sel]
                                        if args.tta_flip and va["feat_flip"] is not None
                                        else None))
@@ -782,6 +791,20 @@ def main() -> None:
             wri.writeheader()
         wri.writerow(row)
     print(f"  실험 로그 누적: {args.results_csv}")
+
+    if args.probs_out is not None and best_probs is not None:
+        args.probs_out.parent.mkdir(parents=True, exist_ok=True)
+        np.savez_compressed(
+            args.probs_out,
+            probs=best_probs.astype(np.float32),
+            y=np.asarray(va["y"], dtype=np.int16),
+            pred=np.asarray(best_pred, dtype=np.int16),
+            person=np.asarray(va["person"], dtype=object),
+            device=np.asarray(va["device"], dtype=np.int16),
+            meta=np.array([args.group, args.target, str(args.grades), args.loss,
+                           args.eval, str(args.seed), args.tag], dtype=object),
+        )
+        print(f"  검증 확률 저장: {args.probs_out}  {best_probs.shape}")
 
     if args.confusion_out is not None and best_pred is not None:
         args.confusion_out.parent.mkdir(parents=True, exist_ok=True)

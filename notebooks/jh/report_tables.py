@@ -27,6 +27,11 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_CSV = PROJECT_ROOT / "results" / "head_experiments.csv"
 
+# 학습 로그가 아닌 별도 기록. 표에 "source" 로 지정한다.
+EXTRA_SOURCES = {
+    "calibration": PROJECT_ROOT / "results" / "calibration_experiments.csv",
+}
+
 
 # --------------------------------------------------------------------------- #
 # 표 정의 - (라벨, 필터) 목록.  필터는 CSV 컬럼에 대한 완전일치 조건이다.
@@ -118,6 +123,30 @@ TABLES: dict[str, dict] = {
             ("DANN λ=0.3", f(tag="DANN/lambda0.3/전체")),
             ("열화 증강", f(tag="DANN/증강/전체")),
             ("열화 증강 + DANN", f(tag="DANN/증강+DANN/전체")),
+        ],
+    },
+    "calib-1": {
+        "title": "예측 신뢰도 - 맞힘/틀림 분리도와 calibration (5시드)",
+        "source": "calibration",
+        "cols": ["conf_correct", "conf_wrong", "conf_auc",
+                 "ece_equal_width", "ece_equal_mass", "brier"],
+        "rows": [
+            ("볼 모공 3등급", f(condition="cheek_pore_3")),
+            ("볼 모공 6등급", f(condition="cheek_pore_6")),
+            ("눈가 주름 3등급", f(condition="eye_wrinkle_3")),
+            ("눈가 주름 7등급", f(condition="eye_wrinkle_7")),
+        ],
+    },
+    "calib-2": {
+        "title": "예측 신뢰도 - temperature scaling (report 조각, 사람 단위 분할)",
+        "source": "calibration",
+        "cols": ["temperature", "ece_report_before", "ece_report_after",
+                 "brier_report_before", "brier_report_after", "argmax_changed"],
+        "rows": [
+            ("볼 모공 3등급", f(condition="cheek_pore_3")),
+            ("볼 모공 6등급", f(condition="cheek_pore_6")),
+            ("눈가 주름 3등급", f(condition="eye_wrinkle_3")),
+            ("눈가 주름 7등급", f(condition="eye_wrinkle_7")),
         ],
     },
     "6.9-1": {
@@ -239,6 +268,12 @@ def col_values(sel: list[dict], col: str) -> list[str]:
     return out
 
 
+def rows_for(spec: dict, default_rows: list[dict], extra: dict) -> list[dict]:
+    """표가 학습 로그가 아닌 다른 기록을 볼 수도 있다."""
+    src = spec.get("source")
+    return default_rows if src is None else extra.get(src, [])
+
+
 def render(name: str, spec: dict, rows: list[dict]) -> tuple[str, list[str]]:
     header = ["조건", *[c.split(":", 1)[-1] for c in spec["cols"]], "n"]
     out = [f"#### {spec['title']}", "",
@@ -266,13 +301,21 @@ def main() -> None:
     rows = load(args.csv)
     print(f"실험 로그 {len(rows):,}건  ({args.csv.relative_to(PROJECT_ROOT)})\n")
 
+    extra: dict[str, list[dict]] = {}
+    for tag, path in EXTRA_SOURCES.items():
+        if path.exists():
+            extra[tag] = load(path)
+            print(f"  + {tag} {len(extra[tag]):,}건  ({path.relative_to(PROJECT_ROOT)})")
+        else:
+            print(f"  + {tag} 없음 ({path.relative_to(PROJECT_ROOT)})")
+
     targets = {args.table: TABLES[args.table]} if args.table else TABLES
     if args.table and args.table not in TABLES:
         raise SystemExit(f"모르는 표: {args.table}\n사용 가능: {', '.join(TABLES)}")
 
     problems: dict[str, list[str]] = {}
     for name, spec in targets.items():
-        body, missing = render(name, spec, rows)
+        body, missing = render(name, spec, rows_for(spec, rows, extra))
         if missing:
             problems[name] = missing
         if not args.check:

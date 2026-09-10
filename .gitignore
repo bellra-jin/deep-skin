@@ -231,6 +231,7 @@ extract_aihub.ps1
 # 단, 실험 결과 기록은 저장소에 남긴다 (results/* 예외)
 !results/head_experiments.csv
 !results/regression_experiments.csv
+!results/calibration_experiments.csv
 
 # 작업 인계서 (개인 메모)
 HANDOFF.md
