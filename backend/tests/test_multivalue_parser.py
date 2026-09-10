@@ -38,7 +38,10 @@ def test_parse_annotations_forehead():
     assert pigmentation.raw_part_name == "forehead"
     assert pigmentation.display_part_name == "이마"
     assert pigmentation.grade_value == 2
-    assert pigmentation.severity == "moderate"
+    # forehead_pigmentation 은 0~3 이 아니라 0~5 다(라벨 전수 집계).
+    # 척도가 길어지면서 등급 2 가 moderate 에서 mild 로 내려갔다.
+    # 상한을 3 으로 잡고 있을 때는 등급 4·5 가 매핑에 없어 리포트에서 사라지고 있었다.
+    assert pigmentation.severity == "mild"
     assert pigmentation.confidence_score is None
     assert pigmentation.predicted_value is None
     assert pigmentation.measured_value is None

@@ -47,9 +47,9 @@ _ZERO_12_34_5 = {
     5: "severe",
 }
 
-# 눈가 주름은 0~6 (7등급) 이다. docs/labeling_codes_guide.md 참고.
-# _ZERO_12_34_5 (0~5) 를 쓰면 등급 6 에서 grade_to_severity 가 None 을 돌려주고
-# 해당 부위 결과가 통째로 버려진다("unknown annotation grade skipped").
+# 7등급(0~6) 라벨용. 눈가 주름·미간 주름·이마 주름·턱 처짐이 여기에 해당한다.
+# 매핑 범위를 벗어난 등급은 grade_to_severity 가 None 을 돌려주고 해당 부위
+# 결과가 통째로 버려진다("unknown annotation grade skipped").
 # 기존 테이블의 규칙(0 은 normal, 최고 등급은 severe, 중간을 나눔)을 따른다.
 _ZERO_12_345_6 = {
     0: "normal",
@@ -61,19 +61,47 @@ _ZERO_12_345_6 = {
     6: "severe",
 }
 
+# 라벨별 실제 등급 범위는 원본 라벨 JSON 112,905건 전수 집계로 확인한 값이다.
+# 문서(docs/labeling_codes_guide.md)의 상한이 네 항목에서 틀려 있었고, 그만큼이
+# 매핑 범위를 벗어나 리포트에서 사라지고 있었다.
+#   glabellus_wrinkle     0~2 로 알고 있었으나 0~6  -> 23.94% (3,003건) 유실
+#   forehead_wrinkle      0~4 로 알고 있었으나 0~6  -> 10.78% (1,352건) 유실
+#   forehead_pigmentation 0~3 로 알고 있었으나 0~5  ->  1.14% (143건) 유실
+#   chin_sagging          0~5 로 알고 있었으나 0~6  ->  0.10% (13건) 유실
+# 등급 수가 같은 라벨은 같은 테이블을 재사용한다. 새 어휘를 만들지 않는다.
 _SEVERITY_BY_ANNOTATION = {
-    "forehead_pigmentation": {0: "normal", 1: "mild", 2: "moderate", 3: "severe"},
-    "forehead_wrinkle": {0: "normal", 1: "mild", 2: "mild", 3: "moderate", 4: "severe"},
-    "glabellus_wrinkle": {0: "normal", 1: "mild", 2: "severe"},
-    "l_perocular_wrinkle": _ZERO_12_345_6,
-    "r_perocular_wrinkle": _ZERO_12_345_6,
-    "l_cheek_pore": _ZERO_12_34_5,
-    "l_cheek_pigmentation": _ZERO_12_34_5,
-    "r_cheek_pore": _ZERO_12_34_5,
-    "r_cheek_pigmentation": _ZERO_12_34_5,
+    "forehead_pigmentation": _ZERO_12_34_5,      # 0~5
+    "forehead_wrinkle": _ZERO_12_345_6,          # 0~6
+    "glabellus_wrinkle": _ZERO_12_345_6,         # 0~6
+    "l_perocular_wrinkle": _ZERO_12_345_6,       # 0~6
+    "r_perocular_wrinkle": _ZERO_12_345_6,       # 0~6
+    "l_cheek_pore": _ZERO_12_34_5,               # 0~5
+    "l_cheek_pigmentation": _ZERO_12_34_5,       # 0~5
+    "r_cheek_pore": _ZERO_12_34_5,               # 0~5
+    "r_cheek_pigmentation": _ZERO_12_34_5,       # 0~5
     "lip_dryness": {0: "normal", 1: "mild", 2: "mild", 3: "moderate", 4: "severe"},
-    "chin_sagging": _ZERO_12_34_5,
+    "chin_sagging": _ZERO_12_345_6,              # 0~6
 }
+
+# 라벨별 실제 최대 등급 (원본 전수 집계). 테스트가 이 값을 기준으로
+# 매핑 누락을 잡는다. 라벨이 늘어나면 여기부터 갱신한다.
+OBSERVED_MAX_GRADE = {
+    "forehead_pigmentation": 5,
+    "forehead_wrinkle": 6,
+    "glabellus_wrinkle": 6,
+    "l_perocular_wrinkle": 6,
+    "r_perocular_wrinkle": 6,
+    "l_cheek_pore": 5,
+    "l_cheek_pigmentation": 5,
+    "r_cheek_pore": 5,
+    "r_cheek_pigmentation": 5,
+    "lip_dryness": 4,
+    "chin_sagging": 6,
+}
+
+# severity 어휘. 소비처가 _SEVERITY_ORDER.get(x, 0) 패턴이라
+# 여기 없는 값을 내보내면 가장 낮은 등급으로 조용히 강등된다.
+SEVERITY_VOCAB = ("normal", "mild", "moderate", "severe")
 
 _ELASTICITY_SUFFIXES = {
     *(f"R{i}" for i in range(10)),

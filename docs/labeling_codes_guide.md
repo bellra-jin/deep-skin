@@ -98,9 +98,9 @@
 | facepart | 부위 | Annotation 키 | 값 범위 | 의미 |
 | :---: | :--- | :--- | :---: | :--- |
 | 0 | 전체 얼굴 | `acne` | `null` 또는 배열 | 여드름 병변 정보 (아래 별도 설명) |
-| 1 | 이마 | `forehead_pigmentation` | 0~3 | 이마 색소침착 정도 |
-| 1 | 이마 | `forehead_wrinkle` | 0~4 | 이마 주름 정도 |
-| 2 | 미간 | `glabellus_wrinkle` | 0~2 | 미간 주름 정도 |
+| 1 | 이마 | `forehead_pigmentation` | 0~5 | 이마 색소침착 정도 |
+| 1 | 이마 | `forehead_wrinkle` | 0~6 | 이마 주름 정도 |
+| 2 | 미간 | `glabellus_wrinkle` | 0~6 | 미간 주름 정도 |
 | 3 | 왼쪽 눈가 | `l_perocular_wrinkle` | 0~6 | 왼쪽 눈가 주름 정도 |
 | 4 | 오른쪽 눈가 | `r_perocular_wrinkle` | 0~6 | 오른쪽 눈가 주름 정도 |
 | 5 | 왼쪽 볼 | `l_cheek_pigmentation` | 0~5 | 왼쪽 볼 색소침착 정도 |
@@ -108,7 +108,7 @@
 | 6 | 오른쪽 볼 | `r_cheek_pigmentation` | 0~5 | 오른쪽 볼 색소침착 정도 |
 | 6 | 오른쪽 볼 | `r_cheek_pore` | 0~5 | 오른쪽 볼 모공 정도 |
 | 7 | 입술 | `lip_dryness` | 0~4 | 입술 건조함 정도 |
-| 8 | 턱 | `chin_sagging` | 0~5 | 턱 처짐 (이중턱) 정도 |
+| 8 | 턱 | `chin_sagging` | 0~6 | 턱 처짐 (이중턱) 정도 |
 
 ### 등급 척도 기준 (공통)
 
@@ -122,19 +122,34 @@
 | **5** | 극심함 (Extremely Severe) — 일부 항목만 해당 |
 
 > 항목별 최대값이 다르므로 주의:
-> - `forehead_pigmentation`: 최대 3
-> - `forehead_wrinkle`: 최대 4
-> - `glabellus_wrinkle`: 최대 2
-> - `lip_dryness`: 최대 4
+> - `forehead_pigmentation`: **최대 5** (6등급)
+> - `forehead_wrinkle`: **최대 6** (7등급)
+> - `glabellus_wrinkle`: **최대 6** (7등급)
+> - `lip_dryness`: 최대 4 (5등급)
 > - `l_perocular_wrinkle`, `r_perocular_wrinkle`: **최대 6** (7등급)
 > - `l_cheek_pigmentation`, `r_cheek_pigmentation`: 최대 5
 > - `l_cheek_pore`, `r_cheek_pore`: 최대 5
-> - `chin_sagging`: 최대 5
+> - `chin_sagging`: **최대 6** (7등급)
 >
-> 눈가 주름은 원래 "최대 5"로 적혀 있었으나, 라벨 JSON 전수 확인에서 **등급 6이
-> train 1,471건(10.2%) / val 205건(11.3%)** 존재합니다. 6등급 헤드로 학습하면
-> 인덱스 범위를 벗어나고, severity 매핑에서도 등급 6이 누락되면 해당 부위 결과가
-> 통째로 버려집니다.
+> **상한이 다섯 항목에서 틀려 있었습니다.** 라벨 JSON 112,905건을 전수 집계해
+> 정정한 값입니다. 상한을 낮게 잡으면 두 곳에서 터집니다 — 분류 헤드를 그 등급 수로
+> 만들면 학습이 인덱스 범위를 벗어나고, `severity` 매핑에 없는 등급은
+> `grade_to_severity()`가 `None`을 돌려줘 **해당 부위 결과가 리포트에서 통째로
+> 사라집니다**(`unknown annotation grade skipped`).
+>
+> 정정 전 매핑 기준 유실량:
+>
+> | annotation | 잘못 알던 상한 | 실제 | 유실 |
+> |---|---:|---:|---:|
+> | `glabellus_wrinkle` | 2 | 6 | **3,003건 (23.94%)** |
+> | `forehead_wrinkle` | 4 | 6 | 1,352건 (10.78%) |
+> | `forehead_pigmentation` | 3 | 5 | 143건 (1.14%) |
+> | `chin_sagging` | 5 | 6 | 13건 (0.10%) |
+> | `l/r_perocular_wrinkle` | 5 | 6 | (§7.5에서 이미 정정) |
+>
+> 실제 값 범위는 `backend/app/services/multivalue_parser.py`의
+> `OBSERVED_MAX_GRADE`가 정본이고, `tests/test_severity_coverage.py`가
+> 매핑이 그 범위를 전부 덮는지 검증합니다.
 
 ### `acne` (여드름) — facepart=0 전용
 
