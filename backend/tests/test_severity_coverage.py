@@ -16,8 +16,11 @@
 상한을 적고, 매핑이 0..max 를 덮지 않으면 여기서 걸린다.
 """
 
+from pathlib import Path
+
 import pytest
 
+from app.services import severity_scale
 from app.services.multivalue_parser import (
     OBSERVED_MAX_GRADE,
     SEVERITY_VOCAB,
@@ -107,3 +110,83 @@ def test_out_of_range_still_returns_none(key):
 
 def test_unknown_key_returns_none():
     assert grade_to_severity("not_a_real_annotation", 0) is None
+
+
+# --------------------------------------------------------------------------- #
+# 추론 엔진도 같은 테이블을 쓰는가
+# --------------------------------------------------------------------------- #
+# 파서만 검사하면 절반이다. 실제로 눈가 주름 상한을 파서에서만 고치고 엔진의
+# 자체 테이블을 두는 바람에, 같은 등급이 경로에 따라 다른 severity 로 나갔다.
+ENGINE_SRC = Path(__file__).resolve().parents[1] / "scripts" / "inference_engine.py"
+
+# 부위마다 등급 상한이 다르다. 엔진이 라벨 이름을 받아 위임하지 않으면
+# 이 셋 중 하나는 반드시 틀린다.
+ENGINE_KEYS = ["forehead_pigmentation", "lip_dryness", "l_perocular_wrinkle"]
+
+
+def test_engine_source_has_no_own_severity_table():
+    """엔진이 매핑을 다시 들고 있으면 언젠가 또 갈라진다."""
+    src = ENGINE_SRC.read_text(encoding="utf-8")
+    assert "severity_map" not in src, (
+        "inference_engine 에 자체 severity 테이블이 있습니다. "
+        "severity_scale 에 위임하세요.")
+    assert "grade_to_severity" in src, (
+        "inference_engine 이 severity_scale.grade_to_severity 를 쓰지 않습니다.")
+
+
+def _engine_module():
+    return pytest.importorskip(
+        "scripts.inference_engine",
+        reason="torch/torchvision 이 없는 환경에서는 건너뜁니다")
+
+
+def test_engine_delegates_to_the_same_function():
+    """값을 복사한 것이 아니라 같은 함수를 부르는지 확인한다."""
+    mod = _engine_module()
+    assert mod.grade_to_severity is severity_scale.grade_to_severity
+
+
+@pytest.mark.parametrize("key", ENGINE_KEYS)
+def test_engine_covers_observed_range(key):
+    """엔진 경로로도 0..실측상한 전 등급이 severity 를 받는가."""
+    mod = _engine_module()
+    top = OBSERVED_MAX_GRADE[key]
+    missing = [g for g in range(top + 1) if mod.grade_to_severity(key, g) is None]
+    assert not missing, f"{key}: 엔진 경로에서 등급 {missing} 이 매핑되지 않습니다."
+    assert mod.grade_to_severity(key, 0) == "normal"
+    assert mod.grade_to_severity(key, top) == "severe"
+
+
+@pytest.mark.parametrize("key", ENGINE_KEYS)
+def test_engine_matches_parser_exactly(key):
+    """엔진과 파서가 같은 등급에 같은 severity 를 내야 한다."""
+    mod = _engine_module()
+    for g in range(OBSERVED_MAX_GRADE[key] + 1):
+        assert mod.grade_to_severity(key, g) == grade_to_severity(key, g)
+
+
+@pytest.mark.parametrize("key,beyond", [("forehead_pigmentation", 6),
+                                        ("lip_dryness", 5),
+                                        ("l_perocular_wrinkle", 7)])
+def test_engine_reports_unmapped_grade_as_none(key, beyond):
+    """상한 밖은 None 이어야 한다. "unknown" 같은 값을 지어내면
+    소비처에서 최저 등급으로 강등돼 조용히 틀린다."""
+    mod = _engine_module()
+    assert mod.grade_to_severity(key, beyond) is None
+
+
+def test_engine_requires_annotation_key():
+    """라벨 이름 없이 등급만 받으면 위임이 성립하지 않는다.
+    조용히 넘어가지 말고 실패해야 한다."""
+    mod = _engine_module()
+    eng = mod.DinoInferenceEngine(backbone_ckpt="x", heads_dir="y")
+    assert eng.annotation_key is None
+    eng.backbone, eng.heads = object(), [object()]
+    with pytest.raises(ValueError, match="annotation_key"):
+        eng.predict(image=None)
+
+
+def test_num_classes_for_matches_observed_max():
+    for key, top in OBSERVED_MAX_GRADE.items():
+        assert severity_scale.num_classes_for(key) == top + 1
+    assert severity_scale.num_classes_for("nope") is None

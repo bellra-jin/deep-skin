@@ -6,6 +6,19 @@ from app.models.ai_raw_response import AiRawResponse
 from app.models.skin_metric_value import SkinMetricValue
 from app.models.skin_part_detection import SkinPartDetection
 from app.models.skin_part_result import SkinPartResult
+# 등급 -> severity 매핑의 정본은 severity_scale 모듈이다.
+# AI 서버의 추론 엔진(backend/scripts/inference_engine.py)도 같은 모듈을 쓴다.
+# 테이블을 양쪽에 두면 갈라진다 - 실제로 눈가 주름 상한을 파서에서만 고쳐
+# 같은 등급이 경로에 따라 다른 severity 로 나간 적이 있다.
+# 파서가 이 이름들을 그대로 재노출하므로 앱 코드 입장에서는 여기가 정본이다.
+from app.services.severity_scale import (  # noqa: F401
+    OBSERVED_MAX_GRADE,
+    SEVERITY_BY_ANNOTATION as _SEVERITY_BY_ANNOTATION,
+    SEVERITY_VOCAB,
+    ZERO_12_34_5 as _ZERO_12_34_5,
+    ZERO_12_345_6 as _ZERO_12_345_6,
+    grade_to_severity,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -38,70 +51,6 @@ _ANNOTATION_SPECS = {
     "chin_sagging": ("chin", "sagging", "처짐", "sagging"),
 }
 
-_ZERO_12_34_5 = {
-    0: "normal",
-    1: "mild",
-    2: "mild",
-    3: "moderate",
-    4: "moderate",
-    5: "severe",
-}
-
-# 7등급(0~6) 라벨용. 눈가 주름·미간 주름·이마 주름·턱 처짐이 여기에 해당한다.
-# 매핑 범위를 벗어난 등급은 grade_to_severity 가 None 을 돌려주고 해당 부위
-# 결과가 통째로 버려진다("unknown annotation grade skipped").
-# 기존 테이블의 규칙(0 은 normal, 최고 등급은 severe, 중간을 나눔)을 따른다.
-_ZERO_12_345_6 = {
-    0: "normal",
-    1: "mild",
-    2: "mild",
-    3: "moderate",
-    4: "moderate",
-    5: "moderate",
-    6: "severe",
-}
-
-# 라벨별 실제 등급 범위는 원본 라벨 JSON 112,905건 전수 집계로 확인한 값이다.
-# 문서(docs/labeling_codes_guide.md)의 상한이 네 항목에서 틀려 있었고, 그만큼이
-# 매핑 범위를 벗어나 리포트에서 사라지고 있었다.
-#   glabellus_wrinkle     0~2 로 알고 있었으나 0~6  -> 23.94% (3,003건) 유실
-#   forehead_wrinkle      0~4 로 알고 있었으나 0~6  -> 10.78% (1,352건) 유실
-#   forehead_pigmentation 0~3 로 알고 있었으나 0~5  ->  1.14% (143건) 유실
-#   chin_sagging          0~5 로 알고 있었으나 0~6  ->  0.10% (13건) 유실
-# 등급 수가 같은 라벨은 같은 테이블을 재사용한다. 새 어휘를 만들지 않는다.
-_SEVERITY_BY_ANNOTATION = {
-    "forehead_pigmentation": _ZERO_12_34_5,      # 0~5
-    "forehead_wrinkle": _ZERO_12_345_6,          # 0~6
-    "glabellus_wrinkle": _ZERO_12_345_6,         # 0~6
-    "l_perocular_wrinkle": _ZERO_12_345_6,       # 0~6
-    "r_perocular_wrinkle": _ZERO_12_345_6,       # 0~6
-    "l_cheek_pore": _ZERO_12_34_5,               # 0~5
-    "l_cheek_pigmentation": _ZERO_12_34_5,       # 0~5
-    "r_cheek_pore": _ZERO_12_34_5,               # 0~5
-    "r_cheek_pigmentation": _ZERO_12_34_5,       # 0~5
-    "lip_dryness": {0: "normal", 1: "mild", 2: "mild", 3: "moderate", 4: "severe"},
-    "chin_sagging": _ZERO_12_345_6,              # 0~6
-}
-
-# 라벨별 실제 최대 등급 (원본 전수 집계). 테스트가 이 값을 기준으로
-# 매핑 누락을 잡는다. 라벨이 늘어나면 여기부터 갱신한다.
-OBSERVED_MAX_GRADE = {
-    "forehead_pigmentation": 5,
-    "forehead_wrinkle": 6,
-    "glabellus_wrinkle": 6,
-    "l_perocular_wrinkle": 6,
-    "r_perocular_wrinkle": 6,
-    "l_cheek_pore": 5,
-    "l_cheek_pigmentation": 5,
-    "r_cheek_pore": 5,
-    "r_cheek_pigmentation": 5,
-    "lip_dryness": 4,
-    "chin_sagging": 6,
-}
-
-# severity 어휘. 소비처가 _SEVERITY_ORDER.get(x, 0) 패턴이라
-# 여기 없는 값을 내보내면 가장 낮은 등급으로 조용히 강등된다.
-SEVERITY_VOCAB = ("normal", "mild", "moderate", "severe")
 
 _ELASTICITY_SUFFIXES = {
     *(f"R{i}" for i in range(10)),
@@ -373,10 +322,6 @@ def _parse_annotations(
                 )
             )
     return results
-
-
-def grade_to_severity(annotation_key: str, grade: int) -> str | None:
-    return _SEVERITY_BY_ANNOTATION.get(annotation_key, {}).get(grade)
 
 
 def _parse_metric_key(metric_key: str) -> tuple[str, str, str] | None:

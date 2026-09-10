@@ -13,6 +13,18 @@ from PIL import Image
 from torchvision import transforms
 from typing import Optional, List, Dict, Any
 
+# severity 매핑은 backend/app/services/severity_scale.py 가 정본이다.
+# 이 엔진은 자체 테이블을 두지 않는다 - 두면 파서 쪽과 갈라진다.
+# 파서를 직접 import 하지 않는 이유는 그쪽이 app.models 를 통해 SQLAlchemy 를
+# 끌고 오기 때문이다. AI 서버가 매핑 하나 때문에 DB 스택을 로드할 이유가 없다.
+_BACKEND_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _BACKEND_ROOT not in sys.path:
+    sys.path.insert(0, _BACKEND_ROOT)
+from app.services.severity_scale import (  # noqa: E402
+    grade_to_severity,
+    num_classes_for,
+)
+
 # ===================================================================
 # DINOv3 Model Definitions
 # ===================================================================
@@ -32,8 +44,13 @@ class DinoInferenceEngine:
         backbone_ckpt: str, 
         heads_dir: str, 
         device: str = None,
-        image_size: int = 448
+        image_size: int = 448,
+        annotation_key: Optional[str] = None,
     ):
+        # 이 엔진 인스턴스가 어떤 라벨을 예측하는지. severity 위임에 필요하다.
+        # 부위마다 등급 상한이 다르므로(이마 색소 0~5 / 눈가 주름 0~6 / 입술 0~4)
+        # 라벨 이름 없이는 등급을 severity 로 옮길 수 없다.
+        self.annotation_key = annotation_key
         self.backbone_ckpt = backbone_ckpt
         self.heads_dir = heads_dir
         self.device = torch.device(device if device else ("cuda" if torch.cuda.is_available() else "cpu"))
@@ -50,26 +67,6 @@ class DinoInferenceEngine:
             transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
         ])
         
-        # 부위별 등급 상한이 다르다 (docs/labeling_codes_guide.md 참고).
-        #   미간 0~2 / 이마 색소 0~3 / 이마 주름·입술 0~4
-        #   볼 모공·볼 색소·턱 처짐 0~5 / 눈가 주름 0~6
-        # 이 엔진은 dummy_ai_server 가 눈가(Part 3)에 쓰는 경로이므로
-        # multivalue_parser._ZERO_12_345_6 (7등급) 과 같은 매핑을 쓴다.
-        # severity 어휘는 계약(backend/docs/ai_inference_contract.md)상
-        # normal / mild / moderate / severe 네 가지로 고정이므로 그 안에서 매핑한다.
-        # 값 자체는 multivalue_parser._ZERO_12_34_5 (dev JSON 경로가 쓰는 정본)와 동일하다.
-        #
-        # 기존 map 은 두 가지로 새고 있었다.
-        #   등급 5·6 -> .get(pred, "unknown") 이 걸려 "unknown"
-        #   등급 4   -> 어휘 밖 값 "very_severe"
-        # 소비처(recommendation_service/report_service/report_cards)가 모두
-        # _SEVERITY_ORDER.get(severity, 0) 패턴이라, 어휘 밖 값은 예외 없이
-        # 가장 낮은 등급으로 조용히 강등된다. 즉 최상위 등급이 정렬에서 최하위로
-        # 취급되고 있었다.
-        self.severity_map = {
-            0: "normal", 1: "mild", 2: "mild",
-            3: "moderate", 4: "moderate", 5: "moderate", 6: "severe",
-        }
 
     def _setup_dinov3_path(self):
         script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -135,9 +132,22 @@ class DinoInferenceEngine:
         return len(self.heads) > 0
 
     @torch.no_grad()
-    def predict(self, image: Image.Image, bbox: Optional[List[int]] = None, use_tta: bool = True) -> Dict[str, Any]:
+    def predict(
+        self,
+        image: Image.Image,
+        bbox: Optional[List[int]] = None,
+        use_tta: bool = True,
+        annotation_key: Optional[str] = None,
+    ) -> Dict[str, Any]:
         if not self.backbone or not self.heads:
             raise RuntimeError("Models are not loaded.")
+
+        key = annotation_key or self.annotation_key
+        if not key:
+            raise ValueError(
+                "annotation_key 가 필요합니다. 부위마다 등급 상한이 달라 "
+                "라벨 이름 없이는 severity 를 정할 수 없습니다 "
+                "(예: 'l_perocular_wrinkle'). 생성자나 predict 인자로 주세요.")
 
         if bbox:
             # bbox: [x1, y1, x2, y2]
@@ -169,8 +179,15 @@ class DinoInferenceEngine:
         probs_np = ensemble_probs[0].cpu().numpy()
         pred_class = int(np.argmax(probs_np))
         
+        severity = grade_to_severity(key, pred_class)
+        if severity is None:
+            # 조용히 "unknown" 을 내보내면 소비처에서 최저 등급으로 강등된다.
+            # 매핑이 못 덮는 등급이 나왔다는 것 자체가 드러나야 한다.
+            print(f"[inference-engine] severity 매핑 없음: "
+                  f"key={key} grade={pred_class} "
+                  f"(등급 수 {self.num_classes}, 매핑 상한 {num_classes_for(key)})")
         return {
             "grade_value": pred_class,
-            "severity": self.severity_map.get(pred_class, "unknown"),
+            "severity": severity,
             "confidence_score": round(float(probs_np[pred_class]), 4),
         }

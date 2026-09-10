@@ -31,10 +31,18 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 BACKBONE_CKPT = os.path.join(SCRIPT_DIR, "dinov3_vits16plus_pretrain_lvd1689m-4057cbaa.pth")
 BASE_DIR = os.path.dirname(SCRIPT_DIR)
 HEADS_DIR = os.path.join(BASE_DIR, "ckpt_kfold_vits_part3")
+# 이 서버가 실제로 추론하는 부위는 facepart 3(왼쪽 눈가) 하나다.
+# 엔진이 등급을 severity 로 옮기려면 어떤 라벨인지 알아야 한다 -
+# 부위마다 등급 상한이 다르기 때문이다(눈가 주름 0~6 / 이마 색소 0~5 / 입술 0~4).
+PART3_ANNOTATION_KEY = "l_perocular_wrinkle"
 YOLO_CKPT = os.path.join(BASE_DIR, "model", "yolo_facecrop_best.pt")
 
 # Initialize Engines
-engine = DinoInferenceEngine(backbone_ckpt=BACKBONE_CKPT, heads_dir=HEADS_DIR)
+engine = DinoInferenceEngine(
+    backbone_ckpt=BACKBONE_CKPT,
+    heads_dir=HEADS_DIR,
+    annotation_key=PART3_ANNOTATION_KEY,
+)
 face_detector = FaceDetector(model_path=YOLO_CKPT)
 
 @asynccontextmanager
