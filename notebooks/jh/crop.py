@@ -18,7 +18,45 @@ IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff"}
 # (docs/labeling_codes_guide.md, README 5.1 참고).
 #   왼쪽 부위는 얼굴이 오른쪽으로 돌 때(R15/R30/8) 카메라 정면으로 온다.
 #   좌/우 명명은 관찰자(이미지) 기준이다 - 해부학 기준이 아니다.
+# 중앙 부위(이마·미간·입술·턱)는 좌우 구분이 없고, 어느 각도에서도 돌아가지
+# 않는다. bbox 기하 통계로 확인한 값이다 - 볼은 각도에 따라 가로/세로 비가
+# 0.17~1.39 로 8배 흔들리는데(부위가 카메라에서 돌아감), 이마는 2.12~2.85,
+# 턱은 2.52~3.16 으로 거의 변하지 않는다. 걸러낼 각도가 없다.
+# 각도 7·8 을 빼면 패드·폰 레코드가 angle 0 만 남아 기기 다양성이 무너지기도 한다.
+_ALL_ANGLES = {0, 1, 2, 3, 4, 5, 6, 7, 8}
+
 FACEPARTS = {
+    1: {
+        "dir": "forehead",
+        "side": "center",
+        "angles": _ALL_ANGLES,
+        "labels": {"pigmentation": "forehead_pigmentation",
+                   "wrinkle": "forehead_wrinkle"},
+        # 등급 상한의 정본은 backend/app/services/severity_scale.py 의
+        # OBSERVED_MAX_GRADE 다 (라벨 JSON 112,905건 전수 집계).
+        "num_classes": {"pigmentation": 6, "wrinkle": 7},
+    },
+    2: {
+        "dir": "glabella",
+        "side": "center",
+        "angles": _ALL_ANGLES,
+        "labels": {"wrinkle": "glabellus_wrinkle"},
+        "num_classes": {"wrinkle": 7},
+    },
+    7: {
+        "dir": "lips",
+        "side": "center",
+        "angles": _ALL_ANGLES,
+        "labels": {"dryness": "lip_dryness"},
+        "num_classes": {"dryness": 5},
+    },
+    8: {
+        "dir": "chin",
+        "side": "center",
+        "angles": _ALL_ANGLES,
+        "labels": {"sagging": "chin_sagging"},
+        "num_classes": {"sagging": 7},
+    },
     3: {
         "dir": "l_eye",
         "side": "left",
@@ -82,9 +120,17 @@ ANGLE_QUALITY_RULES: dict[int, dict] = {}
 # (150 / 0.45 / 60000)을 그대로 쓰면 40% 가 버려진다.
 # 여기서는 명백한 쓰레기만 걸러내는 하한만 두고, 실제 임계값 결정은
 # 학습 시점의 --min-width 필터로 미룬다 (재크롭 없이 비교하기 위해).
+# 부위마다 면적이 달라 볼 기준(150 / 0.45 / 60000)이 맞지 않는다.
+# 하한을 올리면 손해라는 것이 이미 확인됐으므로(README 8.3) 여백 확장 후
+# crop 크기의 0.5 백분위를 읽기 좋은 값으로 내려 명백한 쓰레기만 거른다.
+# 실제 임계값 결정은 학습 시점의 --min-width 로 미룬다(재크롭 없이 비교하려고).
 FACEPART_QUALITY_RULES: dict[int, dict] = {
-    3: {"min_width": 90, "min_ratio": 0.10, "min_area": 5000},
-    4: {"min_width": 90, "min_ratio": 0.10, "min_area": 5000},
+    1: {"min_width": 280, "min_ratio": 1.40, "min_area": 34000},   # 이마
+    2: {"min_width": 60, "min_ratio": 0.25, "min_area": 6000},     # 미간
+    3: {"min_width": 90, "min_ratio": 0.10, "min_area": 5000},     # 왼눈가
+    4: {"min_width": 90, "min_ratio": 0.10, "min_area": 5000},     # 오른눈가
+    7: {"min_width": 190, "min_ratio": 1.30, "min_area": 17000},   # 입술
+    8: {"min_width": 440, "min_ratio": 2.05, "min_area": 76000},   # 턱
 }
 FACEPART_ANGLE_QUALITY_RULES: dict[tuple[int, int], dict] = {}
 

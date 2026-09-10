@@ -64,6 +64,20 @@ MERGE_3_LUTS = {
 }
 
 
+def merge3_lut_from_cuts(full_grades: int, cuts: list[int]) -> np.ndarray:
+    """절단점으로 3등급 룩업을 만든다. cuts=[a, b] 이면 0..a / a+1..b / b+1.. 이다.
+
+    LUT 는 등급 수로만 키가 잡혀 있어 부위별 분포 균등 경계를 낼 수 없다.
+    경계를 지표로 고르면 순환 논리가 되므로, 어떤 경계를 왜 택했는지를
+    적을 수 있게 절단점을 밖에서 주도록 한다.
+    """
+    if len(cuts) != 2 or not (0 <= cuts[0] < cuts[1] < full_grades - 1):
+        raise SystemExit(f"--merge3-cuts 는 0 <= a < b < {full_grades - 1} 인 두 정수여야 합니다: {cuts}")
+    a, b = cuts
+    return np.array([0 if g <= a else 1 if g <= b else 2
+                     for g in range(full_grades)], dtype=np.int64)
+
+
 def merge3_lut(full_grades: int, scheme: str) -> np.ndarray:
     key = (full_grades, scheme)
     if key not in MERGE_3_LUTS:
@@ -425,6 +439,9 @@ def main() -> None:
                     help="pore | pigmentation | wrinkle 등. 특징 파일의 labels_* 키")
     ap.add_argument("--grades", type=int, default=0,
                     help="0이면 부위 테이블의 등급 수를 그대로 쓴다. 3이면 3등급 병합.")
+    ap.add_argument("--merge3-cuts", default=None,
+                    help="3등급 병합 절단점을 직접 준다 (예: 1,3 -> 0-1 / 2-3 / 4-). "
+                         "주면 --merge3 보다 우선한다.")
     ap.add_argument("--merge3", choices=["boundary", "proportional"],
                     default="boundary",
                     help="3등급 병합 경계. 볼(6등급)은 두 값이 동일하다.")
@@ -556,7 +573,13 @@ def main() -> None:
 
     train_dev = 0 if args.eval == "device" else None
     val_dev = 2 if args.eval == "device" else None
-    lut = merge3_lut(full_grades, args.merge3) if args.grades == 3 else None
+    lut = None
+    if args.grades == 3:
+        if args.merge3_cuts:
+            lut = merge3_lut_from_cuts(
+                full_grades, [int(x) for x in args.merge3_cuts.split(",")])
+        else:
+            lut = merge3_lut(full_grades, args.merge3)
     va_min_width = args.min_width if args.min_width_split == "both" else 0
     tr = prepare(tr_pack, args.target, args.grades, train_dev, args.min_width, lut)
     va = prepare(va_pack, args.target, args.grades, val_dev, va_min_width, lut,
