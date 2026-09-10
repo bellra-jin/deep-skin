@@ -30,6 +30,7 @@ DEFAULT_CSV = PROJECT_ROOT / "results" / "head_experiments.csv"
 # 학습 로그가 아닌 별도 기록. 표에 "source" 로 지정한다.
 EXTRA_SOURCES = {
     "calibration": PROJECT_ROOT / "results" / "calibration_experiments.csv",
+    "regression": PROJECT_ROOT / "results" / "regression_experiments.csv",
 }
 
 
@@ -123,6 +124,46 @@ TABLES: dict[str, dict] = {
             ("DANN λ=0.3", f(tag="DANN/lambda0.3/전체")),
             ("열화 증강", f(tag="DANN/증강/전체")),
             ("열화 증강 + DANN", f(tag="DANN/증강+DANN/전체")),
+        ],
+    },
+    "parts-1": {
+        "title": "부위별 분류 성능 (3등급 · DINOv3 · 5시드)",
+        "cols": ["macro_f1", "qwk"],
+        "rows": [
+            ("턱 처짐 (균등 경계)", f(tag="부위확장/턱처짐/3등급-균등")),
+            ("턱 처짐 (척도 위치)", f(tag="부위확장/턱처짐/3등급-척도")),
+            ("이마 색소 (척도 위치)", f(tag="부위확장/이마색소/3등급-척도")),
+            ("이마 색소 (균등 경계)", f(tag="부위확장/이마색소/3등급-균등")),
+            ("이마 주름", f(tag="부위확장/이마주름/3등급")),
+            ("눈가 주름", f(tag="5.1/3등급-boundary")),
+            ("볼 모공", f(tag="pore/noTTA")),
+        ],
+    },
+    "parts-2": {
+        "title": "부위별 분류 성능 - 실측 등급 수 그대로 (5시드)",
+        "cols": ["macro_f1", "qwk"],
+        "rows": [
+            ("이마 색소 6등급", f(tag="부위확장/이마색소/6등급")),
+            ("이마 주름 7등급", f(tag="부위확장/이마주름/7등급")),
+            ("턱 처짐 7등급", f(tag="부위확장/턱처짐/7등급")),
+            ("눈가 주름 7등급", f(tag="5.1/7등급/ce")),
+        ],
+    },
+    "parts-3": {
+        "title": "지표별 회귀 - 사진으로 읽히는가 (5시드)",
+        "source": "regression",
+        "cols": ["spearman", "r2", "mae"],
+        "rows": [
+            ("모공 개수 · 볼", f(tag="회귀/모공개수/reg")),
+            ("거칠기 Ra · 눈가", f(tag="회귀/눈가Ra/reg")),
+            ("수분 · 볼", f(tag="지표/수분/볼")),
+            ("수분 · 턱", f(tag="지표/수분/턱")),
+            ("수분 · 이마", f(tag="지표/수분/이마")),
+            ("탄력 R2 · 볼", f(tag="지표/탄력R2/볼")),
+            ("탄력 R7 · 이마", f(tag="지표/탄력R7/이마")),
+            ("탄력 R2 · 턱", f(tag="지표/탄력R2/턱")),
+            ("탄력 R2 · 이마", f(tag="지표/탄력R2/이마")),
+            ("탄력 R7 · 턱", f(tag="지표/탄력R7/턱")),
         ],
     },
     "calib-1": {
