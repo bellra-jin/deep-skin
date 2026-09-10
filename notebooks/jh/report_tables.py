@@ -126,6 +126,26 @@ TABLES: dict[str, dict] = {
             ("열화 증강 + DANN", f(tag="DANN/증강+DANN/전체")),
         ],
     },
+    "relabel-1": {
+        "title": "등급 경계 재정의 - 클래스 비율을 맞춘 비교 (3등급 · 5시드)",
+        "cols": ["macro_f1", "qwk", "accuracy"],
+        "rows": [
+            ("볼 모공 · 전문가 (기준선)", f(tag="재경계/볼/전문가")),
+            ("볼 모공 · prior-matched", f(tag="재경계/볼/prior")),
+            ("볼 모공 · 회귀→이산화", f(tag="재경계/볼/회귀이산화")),
+            ("눈가 주름 · 전문가 (기준선)", f(tag="재경계/눈가/전문가")),
+            ("눈가 주름 · prior-matched", f(tag="재경계/눈가/prior")),
+            ("눈가 주름 · 회귀→이산화", f(tag="재경계/눈가/회귀이산화")),
+        ],
+    },
+    "relabel-2": {
+        "title": "등급 경계 재정의 - balanced (33/33/33). 기준선과 비교 불가",
+        "cols": ["macro_f1", "qwk", "accuracy"],
+        "rows": [
+            ("볼 모공 · balanced", f(tag="재경계/볼/balanced")),
+            ("눈가 주름 · balanced", f(tag="재경계/눈가/balanced")),
+        ],
+    },
     "parts-1": {
         "title": "부위별 분류 성능 (3등급 · DINOv3 · 5시드)",
         "cols": ["macro_f1", "qwk"],

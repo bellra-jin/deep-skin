@@ -439,6 +439,14 @@ def main() -> None:
                     help="pore | pigmentation | wrinkle 등. 특징 파일의 labels_* 키")
     ap.add_argument("--grades", type=int, default=0,
                     help="0이면 부위 테이블의 등급 수를 그대로 쓴다. 3이면 3등급 병합.")
+    ap.add_argument("--relabel", choices=["none", "prior", "balanced"], default="none",
+                    help="등급 라벨을 장비 측정값(--reg-target)의 분위수로 다시 끊는다. "
+                         "prior: 전문가 등급의 클래스 비율과 같아지도록 절단 "
+                         "(클래스 균형 효과를 통제해 경계 위치만 비교하려는 것). "
+                         "balanced: 33/33/33 - 기준선과 비교하면 안 된다.")
+    ap.add_argument("--reg-discretize", action="store_true",
+                    help="--task reg 로 학습한 회귀 예측을 같은 절단점으로 이산화해 "
+                         "분류 지표를 낸다. 연속 타깃으로 배우는 편이 쉬운지 본다.")
     ap.add_argument("--merge3-cuts", default=None,
                     help="3등급 병합 절단점을 직접 준다 (예: 1,3 -> 0-1 / 2-3 / 4-). "
                          "주면 --merge3 보다 우선한다.")
@@ -584,6 +592,34 @@ def main() -> None:
     tr = prepare(tr_pack, args.target, args.grades, train_dev, args.min_width, lut)
     va = prepare(va_pack, args.target, args.grades, val_dev, va_min_width, lut,
                  angles=args.eval_angles)
+
+    # 라벨 재정의. 절단점은 train 측정값에서만 낸다 - val 분포를 쓰면 누수다.
+    reg_cuts = None
+    if args.relabel != "none":
+        if tr.get("reg") is None:
+            raise SystemExit("--relabel 은 --reg-target 이 필요합니다.")
+        if args.grades != 3:
+            raise SystemExit("--relabel 은 --grades 3 에서만 지원합니다.")
+        fin_tr = np.isfinite(tr["reg"])
+        if not fin_tr.all() or not np.isfinite(va["reg"]).all():
+            raise SystemExit("측정값에 결측이 있어 라벨을 다시 끊을 수 없습니다.")
+        if args.relabel == "prior":
+            # 전문가 3등급의 클래스 비율을 그대로 맞춘다. 클래스 균형 효과를
+            # 통제해야 macro-F1 차이를 "경계 위치의 학습 가능성" 으로 읽을 수 있다.
+            props = [float((tr["y"] == k).mean()) for k in range(3)]
+            qs = [props[0] * 100, (props[0] + props[1]) * 100]
+        else:
+            qs = [100 / 3, 200 / 3]
+        reg_cuts = [float(np.percentile(tr["reg"], q)) for q in qs]
+        old_tr = tr["y"].copy()
+        tr["y"] = np.digitize(tr["reg"], reg_cuts).astype(np.int64)
+        va["y"] = np.digitize(va["reg"], reg_cuts).astype(np.int64)
+        agree = float((old_tr == tr["y"]).mean())
+        print(f"  라벨 재정의({args.relabel}): 절단점 {[round(c, 1) for c in reg_cuts]} "
+              f"(train 분위수 {[round(q, 2) for q in qs]})")
+        print(f"    train 전문가 라벨과 일치율 {agree * 100:.2f}%  "
+              f"새 비율 " + " / ".join(f"{float((tr['y'] == k).mean()) * 100:.1f}%"
+                                      for k in range(3)))
 
     if args.tta_flip and va["feat_flip"] is None:
         raise SystemExit(
@@ -743,7 +779,17 @@ def main() -> None:
         rm = {}
         if reg_head is not None:
             pz = predict_reg(model, reg_head, va["feat"])
-            rm = reg_metrics(pz * reg_sd + reg_mu, va_reg_true)
+            pred_orig = pz * reg_sd + reg_mu
+            rm = reg_metrics(pred_orig, va_reg_true)
+            if args.reg_discretize and reg_cuts is not None:
+                # 연속 예측을 같은 절단점으로 이산화해 분류 지표를 낸다.
+                dp = np.digitize(pred_orig, reg_cuts).astype(np.int64)
+                m = {
+                    "macro_f1": f1_score(va["y"], dp, average="macro", zero_division=0),
+                    "accuracy": accuracy_score(va["y"], dp),
+                    "qwk": cohen_kappa_score(va["y"], dp, weights="quadratic"),
+                }
+                pred_now = dp
         # 회귀 단독일 때는 분류 지표로 고를 수 없다. 순위 상관으로 고른다.
         score = rm.get("spearman", float("nan")) if args.task == "reg" else m["macro_f1"]
         if score != score:
