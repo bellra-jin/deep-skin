@@ -94,6 +94,101 @@ def load_npz(path: Path) -> dict:
     return {k: z[k] for k in z.files}
 
 
+def load_reg_targets(pack: dict, group: str, split: str, key: str) -> np.ndarray:
+    """npz 의 image_path 순서에 맞춰 equipment_json 에서 회귀 타깃을 뽑는다.
+
+    특징을 다시 뽑을 필요가 없다 - 입력 이미지가 같으므로 특징도 같다.
+    좌우 부위는 키 이름이 다르므로(l_cheek_* / r_cheek_*) facepart 로 분기한다.
+    결측은 NaN 으로 두고 손실에서 마스킹한다. 평균으로 채우면 없는 값이
+    있는 것처럼 학습된다.
+    """
+    csv_path = PROJECT_ROOT / "data" / "processed" / f"{group}_{split}_metadata.csv"
+    if not csv_path.exists():
+        raise SystemExit(f"메타데이터 CSV 가 없습니다: {csv_path}")
+    csv.field_size_limit(10 ** 9)
+    by_path: dict[str, str] = {}
+    with csv_path.open(encoding="utf-8") as fh:
+        for row in csv.DictReader(fh):
+            by_path[row["image_path"]] = row.get("equipment_json") or ""
+
+    out = np.full(len(pack["image_path"]), np.nan, dtype=np.float64)
+    miss_row = miss_key = 0
+    for i, (ip, fp) in enumerate(zip(pack["image_path"], pack["facepart"])):
+        raw = by_path.get(str(ip))
+        if not raw:
+            miss_row += 1
+            continue
+        try:
+            eq = json.loads(raw)
+        except ValueError:
+            miss_row += 1
+            continue
+        side = FACEPARTS.get(int(fp), {}).get("side")
+        prefix = "l_" if side == "left" else "r_" if side == "right" else ""
+        val = eq.get(prefix + key, eq.get(key))
+        if val is None:
+            miss_key += 1
+            continue
+        try:
+            out[i] = float(val)
+        except (TypeError, ValueError):
+            miss_key += 1
+    ok = int(np.isfinite(out).sum())
+    print(f"  회귀 타깃 {key} ({split}): {ok:,}/{len(out):,} "
+          f"({ok / max(len(out), 1) * 100:.1f}%)  CSV 미매칭 {miss_row:,} / 키 없음 {miss_key:,}")
+    if ok == 0:
+        raise SystemExit(f"회귀 타깃 {key} 를 하나도 찾지 못했습니다. "
+                         "키 이름을 확인하세요 (equipment_audit.py 로 목록을 볼 수 있습니다).")
+    return out
+
+
+def reg_metrics(pred: np.ndarray, true: np.ndarray) -> dict:
+    """원 단위 지표. 표준화된 MAE 는 해석이 안 되므로 역변환 후에 잰다."""
+    m = np.isfinite(true) & np.isfinite(pred)
+    if m.sum() < 2:
+        return {"mae": float("nan"), "rmse": float("nan"),
+                "r2": float("nan"), "spearman": float("nan"), "n": int(m.sum())}
+    p, t = pred[m], true[m]
+    err = p - t
+    ss_res = float((err ** 2).sum())
+    ss_tot = float(((t - t.mean()) ** 2).sum())
+    return {
+        "mae": float(np.abs(err).mean()),
+        "rmse": float(np.sqrt((err ** 2).mean())),
+        "r2": 1.0 - ss_res / ss_tot if ss_tot > 0 else float("nan"),
+        "spearman": _spearman(p, t),
+        "n": int(m.sum()),
+    }
+
+
+def _spearman(a: np.ndarray, b: np.ndarray) -> float:
+    """순위 상관. B 절(equipment_audit.py)에서 쓴 것과 같은 지표다."""
+    def rank(x):
+        order = np.argsort(x, kind="mergesort")
+        r = np.empty(len(x), dtype=np.float64)
+        r[order] = np.arange(1, len(x) + 1, dtype=np.float64)
+        # 동점은 평균 순위로
+        _, inv, cnt = np.unique(x, return_inverse=True, return_counts=True)
+        sums = np.zeros(len(cnt)); np.add.at(sums, inv, r)
+        return (sums / cnt)[inv]
+    ra, rb = rank(a), rank(b)
+    ra -= ra.mean(); rb -= rb.mean()
+    den = float(np.sqrt((ra ** 2).sum() * (rb ** 2).sum()))
+    return float((ra * rb).sum() / den) if den > 0 else float("nan")
+
+
+@torch.inference_mode()
+def predict_reg(model, reg_head, feat, batch=1024) -> np.ndarray:
+    """표준화된 공간의 회귀 예측. 원 단위 변환은 호출부에서 한다."""
+    model.eval()
+    reg_head.eval()
+    out = []
+    for i in range(0, len(feat), batch):
+        xb = torch.from_numpy(np.ascontiguousarray(feat[i:i + batch]))
+        out.append(reg_head(model.trunk(xb)).squeeze(1).numpy())
+    return np.concatenate(out) if out else np.zeros(0, dtype=np.float32)
+
+
 def prepare(pack: dict, target: str, grades: int, device_filter: int | None,
             min_width: int = 0, lut: np.ndarray | None = None,
             angles: list[int] | None = None):
@@ -124,6 +219,7 @@ def prepare(pack: dict, target: str, grades: int, device_filter: int | None,
     }
     out["feat_flip"] = pack["feat_flip"][idx] if "feat_flip" in pack else None
     out["feat_devaug"] = pack["feat_devaug"][idx] if "feat_devaug" in pack else None
+    out["reg"] = pack["reg"][idx] if "reg" in pack else None
     return out
 
 
@@ -135,11 +231,13 @@ class FeatDataset(Dataset):
     """
 
     def __init__(self, feat, feat_flip, feat_devaug, y,
-                 augment: bool, aug_prob: float = 0.5):
+                 augment: bool, aug_prob: float = 0.5, reg=None):
         self.feat, self.y = feat, y
         self.feat_flip = feat_flip if augment else None
         self.feat_devaug = feat_devaug
         self.aug_prob = aug_prob
+        # 회귀 타깃. 결측은 NaN 으로 두고 손실에서 마스킹한다.
+        self.reg = reg
 
     def __len__(self) -> int:
         return len(self.y)
@@ -150,7 +248,8 @@ class FeatDataset(Dataset):
             x = self.feat_devaug[i]
         elif self.feat_flip is not None and np.random.rand() < 0.5:
             x = self.feat_flip[i]
-        return torch.from_numpy(np.ascontiguousarray(x)), int(self.y[i])
+        r = float("nan") if self.reg is None else float(self.reg[i])
+        return torch.from_numpy(np.ascontiguousarray(x)), int(self.y[i]), r
 
 
 # --------------------------------------------------------------------------- #
@@ -320,6 +419,16 @@ def main() -> None:
     ap.add_argument("--min-width", type=int, default=0,
                     help="크롭 폭 하한. 0이면 필터 없음. "
                          "npz 에 crop_width 가 없으면 무시하고 경고한다.")
+    ap.add_argument("--reg-target", default=None,
+                    help="회귀 타깃 키 (equipment_json 안의 키, 좌우 접두사 제외). "
+                         "예: cheek_moisture / cheek_pore / perocular_wrinkle_Ra")
+    ap.add_argument("--task", choices=["cls", "reg", "both"], default="cls",
+                    help="cls 분류만 / reg 회귀만 / both 멀티태스크")
+    ap.add_argument("--reg-lambda", type=float, default=1.0,
+                    help="회귀 손실 가중치")
+    ap.add_argument("--reg-csv", type=Path,
+                    default=PROJECT_ROOT / "results" / "regression_experiments.csv",
+                    help="회귀 지표 기록. head_experiments.csv 에 컬럼을 늘리지 않는다.")
     ap.add_argument("--dann", action="store_true",
                     help="적대적 도메인 적응. 디카(소스)와 폰(타깃)의 특징 분포를 "
                          "gradient reversal 로 맞춘다. 타깃 라벨은 쓰지 않는다.")
@@ -359,6 +468,12 @@ def main() -> None:
                     default=PROJECT_ROOT / "results" / "head_experiments.csv")
     ap.add_argument("--tag", default="", help="실험 로그에 남길 메모")
     args = ap.parse_args()
+
+    if args.task != "cls" and not args.reg_target:
+        raise SystemExit("--task reg/both 는 --reg-target 이 필요합니다.")
+    if args.reg_target and args.hidden == 0:
+        raise SystemExit("--reg-target 은 --hidden > 0 이 필요합니다. "
+                         "회귀 출력이 분류 head 의 trunk 를 공유하기 때문입니다.")
 
     if args.dann and args.hidden == 0:
         raise SystemExit(
@@ -409,6 +524,10 @@ def main() -> None:
         tr_pack["feat_devaug"] = aug_pack["feat"]
         print(f"  열화 특징 사이드카: {aug_path.name}  (aug_prob={args.aug_prob})")
 
+    if args.reg_target:
+        tr_pack["reg"] = load_reg_targets(tr_pack, args.group, "train", args.reg_target)
+        va_pack["reg"] = load_reg_targets(va_pack, args.group, "val", args.reg_target)
+
     full_grades = TARGET_NUM_CLASSES.get(args.target, 6)
     if args.grades == 0:
         args.grades = full_grades
@@ -455,6 +574,17 @@ def main() -> None:
         if pack.get("feat_devaug") is not None:
             pack["feat_devaug"] = ((pack["feat_devaug"] - mu) / sd).astype(np.float32)
 
+    # 회귀 타깃 표준화. train 통계를 val 에도 그대로 쓴다 - val 통계를 쓰면 누수다.
+    # 지표는 역변환해 원 단위로 보고한다(표준화된 MAE 는 해석이 안 된다).
+    reg_mu = reg_sd = None
+    if args.reg_target:
+        fin = tr["reg"][np.isfinite(tr["reg"])]
+        if len(fin) < 10:
+            raise SystemExit(f"회귀 타깃 표본이 너무 적습니다: {len(fin)}건")
+        reg_mu, reg_sd = float(fin.mean()), float(fin.std() + 1e-9)
+        print(f"  회귀 타깃 표준화: mu={reg_mu:.4f} sd={reg_sd:.4f} "
+              f"(train {len(fin):,}건 / val {int(np.isfinite(va['reg']).sum()):,}건)")
+
     # 적대적 도메인 적응용 소스/타깃 특징.
     # 둘 다 train split 에서만 뽑는다 - val split 은 학습에 일절 쓰지 않는다.
     # 타깃(폰)은 라벨을 쓰지 않고 도메인 손실에만 들어간다.
@@ -472,8 +602,10 @@ def main() -> None:
         print(f"  DANN 소스(디카) {len(src_t):,}건 / 타깃(폰) {len(tgt_t):,}건 "
               f"lambda<={args.dann_lambda} hidden={args.dann_hidden}")
 
+    tr_reg_z = None if reg_mu is None else (tr["reg"] - reg_mu) / reg_sd
     ds = FeatDataset(tr["feat"], tr["feat_flip"], tr.get("feat_devaug"), tr["y"],
-                     augment=not args.no_flip_aug, aug_prob=args.aug_prob)
+                     augment=not args.no_flip_aug, aug_prob=args.aug_prob,
+                     reg=tr_reg_z)
     if args.sampler == "weighted":
         w = (1.0 / np.maximum(counts, 1))[tr["y"]]
         sampler = WeightedRandomSampler(torch.DoubleTensor(w), len(w), replacement=True)
@@ -500,13 +632,20 @@ def main() -> None:
     # 도메인 분류기는 원본 특징이 아니라 model.trunk 의 출력을 받는다.
     # 백본이 동결돼 있어 원본 특징에 GRL 을 걸면 역전된 기울기가 흘러갈
     # 학습 파라미터가 없다(도메인 손실이 즉시 0 으로 붕괴한다).
+    # 회귀 출력은 분류 head 의 trunk 를 그대로 공유하고 선형층 하나만 더 둔다.
+    reg_head = nn.Linear(model.feat_dim, 1) if args.reg_target else None
+
     dom_head = (DomainHead(model.feat_dim, args.dann_hidden, args.dropout)
                 if args.dann else None)
-    params = list(model.parameters()) + (list(dom_head.parameters()) if dom_head else [])
+    params = (list(model.parameters())
+              + (list(reg_head.parameters()) if reg_head else [])
+              + (list(dom_head.parameters()) if dom_head else []))
     opt = torch.optim.AdamW(params, lr=args.lr, weight_decay=args.weight_decay)
     sched = torch.optim.lr_scheduler.ReduceLROnPlateau(opt, mode="max", factor=0.5, patience=5)
 
     best = {"macro_f1": -1.0}
+    best_reg: dict = {}
+    va_reg_true = va["reg"] if args.reg_target else None
     best_epoch, bad, t0 = 0, 0, time.time()
     print(f"\n{'epoch':>5} {'loss':>8} {'macroF1':>8} {'acc':>7} {'QWK':>7}")
     for ep in range(1, args.epochs + 1):
@@ -516,7 +655,7 @@ def main() -> None:
         lambd = dann_lambda_at(ep, args.epochs, args.dann_lambda) if args.dann else 0.0
         tot = 0.0
         dom_tot, dom_n = 0.0, 0
-        for xb, yb in loader:
+        for xb, yb, rb in loader:
             yb = yb.long()
             out = model(xb)
             if args.loss == "coral":
@@ -525,6 +664,15 @@ def main() -> None:
                 loss = focal_loss(out, yb, args.focal_gamma, cw)
             else:
                 loss = F.cross_entropy(out, yb, weight=cw, label_smoothing=0.05)
+            if args.task == "reg":
+                loss = loss * 0.0        # 분류 손실을 끄되 그래프는 유지한다
+            if reg_head is not None and args.task in ("reg", "both"):
+                # 결측(NaN)은 마스킹해 손실에서 제외한다. 평균으로 채우지 않는다.
+                mask = torch.isfinite(rb)
+                if mask.any():
+                    pred = reg_head(model.trunk(xb)).squeeze(1)
+                    rloss = F.smooth_l1_loss(pred[mask], rb[mask].float())
+                    loss = loss + args.reg_lambda * rloss
             if dom_head is not None:
                 # 소스/타깃을 같은 수만큼 뽑아 "한 배치로 이어 붙여" 한 번만 forward 한다.
                 # 나눠서 두 번 forward 하면 trunk 의 BatchNorm 이 도메인별로 다른
@@ -546,16 +694,29 @@ def main() -> None:
 
         m, _ = evaluate(model, va["feat"], va["y"], args.loss,
                         feat_flip=va["feat_flip"] if args.tta_flip else None)
-        sched.step(m["macro_f1"])
+        rm = {}
+        if reg_head is not None:
+            pz = predict_reg(model, reg_head, va["feat"])
+            rm = reg_metrics(pz * reg_sd + reg_mu, va_reg_true)
+        # 회귀 단독일 때는 분류 지표로 고를 수 없다. 순위 상관으로 고른다.
+        score = rm.get("spearman", float("nan")) if args.task == "reg" else m["macro_f1"]
+        if score != score:
+            score = -1.0
+        sched.step(score)
         mark = ""
-        if m["macro_f1"] > best["macro_f1"]:
-            best, best_epoch, bad = m, ep, 0
+        if score > best.get("_score", -1.0):
+            best, best_epoch, bad = dict(m), ep, 0
+            best["_score"] = score
+            best_reg = dict(rm)
             mark = "  *"
         else:
             bad += 1
         if ep <= 3 or ep % 5 == 0 or mark:
             extra = (f"  dom {dom_tot/max(dom_n,1):.3f} lam {lambd:.2f}"
                      if dom_head is not None else "")
+            if rm:
+                extra += (f"  MAE {rm['mae']:.3f} R2 {rm['r2']:.3f} "
+                          f"rho {rm['spearman']:.3f}")
             print(f"{ep:>5} {tot/len(ds):>8.4f} {m['macro_f1']:>8.4f} "
                   f"{m['accuracy']:>7.4f} {m['qwk']:>7.4f}{mark}{extra}")
         if args.patience and bad >= args.patience:
@@ -604,6 +765,37 @@ def main() -> None:
             wri.writeheader()
         wri.writerow(row)
     print(f"  실험 로그 누적: {args.results_csv}")
+
+    # 회귀 지표는 별도 CSV 로 쓴다. head_experiments.csv 에 컬럼을 늘리면
+    # 기존 행의 헤더와 어긋난다.
+    if best_reg:
+        args.reg_csv.parent.mkdir(parents=True, exist_ok=True)
+        reg_row = {
+            "run_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
+            "group": args.group, "target": args.target, "grades": args.grades,
+            "reg_target": args.reg_target, "task": args.task,
+            "reg_lambda": args.reg_lambda, "eval": args.eval, "arch": args.arch,
+            "hidden": args.hidden, "seed": args.seed,
+            "n_train_reg": int(np.isfinite(tr["reg"]).sum()),
+            "n_val_reg": best_reg.get("n", 0),
+            "reg_mu": round(reg_mu, 4), "reg_sd": round(reg_sd, 4),
+            "mae": round(best_reg["mae"], 4),
+            "rmse": round(best_reg["rmse"], 4),
+            "r2": round(best_reg["r2"], 4),
+            "spearman": round(best_reg["spearman"], 4),
+            "macro_f1": round(best["macro_f1"], 4),
+            "qwk": round(best["qwk"], 4),
+            "best_epoch": best_epoch, "tag": args.tag,
+        }
+        new_reg = not args.reg_csv.exists()
+        with args.reg_csv.open("a", newline="", encoding="utf-8-sig") as f:
+            wri = csv.DictWriter(f, fieldnames=list(reg_row.keys()))
+            if new_reg:
+                wri.writeheader()
+            wri.writerow(reg_row)
+        print(f"  회귀 지표: MAE {best_reg['mae']:.3f} (원 단위) · "
+              f"RMSE {best_reg['rmse']:.3f} · R2 {best_reg['r2']:.4f} · "
+              f"rho {best_reg['spearman']:.4f}  -> {args.reg_csv}")
 
 
 if __name__ == "__main__":
